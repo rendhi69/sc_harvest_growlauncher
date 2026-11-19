@@ -27,7 +27,6 @@ if not content or content == "" then
         "/storage/emulated/0/Android/media/launcher.powerkuy.growlauncher/ScriptLua/auto_harvest.lua",
         "/storage/emulated/0/Android/data/launcher.powerkuy.growlauncher/files/ScriptLua/auto_harvest.lua",
         "/storage/emulated/0/Download/auto_harvest.lua",
-        "d:/rotasi 2026/SC LAMA OLD JUTUN/sc growlauncher/script/script code/auto_harvest.lua",
         "script/script code/auto_harvest.lua",
         "auto_harvest.lua",
     }

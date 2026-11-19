@@ -17,7 +17,7 @@ notifyUser("Memuat Auto Harvest...")
 local content = nil
 if fetch then
     local ok, res = pcall(fetch, fetchUrl)
-    if ok and type(res) == "string" and res ~= "" and not res:match("^404") and res:find("BOREN HARVEST") then
+    if ok and type(res) == "string" and res ~= "" and not res:match("^404") and not res:match("^<!DOCTYPE") then
         content = res
     end
 end

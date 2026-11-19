@@ -1,17 +1,25 @@
 # Auto Harvest Pro - Growlauncher (Boren Store)
 
-Script Auto Harvest Growlauncher dengan dukungan Multi-World Save berlimit, Event Mooncake, Gear World, Ignore Gems, Mode 3-Zigzag, dan Take Floating.
+Script Auto Harvest Growlauncher generasi terbaru dengan dukungan Multi-World Save Table (pilihan ALL / BLOCK / SEED), Event Mooncake Table dengan Limit Total, Unified Magni & Fuel, Gear Equip ID List, Ignore Gems, Mode 3-Zigzag, dan Take Floating.
 
-## Fitur Lengkap
-1. **Farm List & Item ID Harvest** — multi-world `WORLD:DOOR:ITEM_ID` (otomatis mendeteksi pasangan Block ID & Seed ID).
-2. **Multi-World Save Block/Seed dengan Limit** — atur batas item per world (mis. `10000` atau `20000`); jika mencapai limit otomatis pindah ke Save World berikutnya.
-3. **Ignore Gems** — blokir otomatis pengambilan Gems (`ID 112`).
-4. **Mode 3-Zigzag Serpentine & 1-by-1** — harvest cepat 3 petak per langkah pola zigzag seperti Auto Plant.
-5. **Auto Collect Block & Seed** — otomatis mengambil hasil panen (termasuk item event) selama harvest.
-6. **Event / Mooncake Save Worlds** — multi-world khusus penyimpanan item event (HarvestFest Mooncake dll.).
-7. **Custom List ID Item Event** — bebas menambah/mengubah daftar ID item selain block & seed untuk disimpan ke Event World (default Mooncake: `1058,1094,1096,1098,1828`).
-8. **Gear World** — 1 world khusus untuk mengambil & auto-equip **Magnifying Glass (1252)**, **DCS (6840)**, **Harvester (1830 / Sorrows 1966)**, dan restock **Fuel Pack (1746)**.
-9. **Opsional Take Floating** — setelah tree habis, menyapu sisa block/seed/event yang jatuh lalu drop ke Save/Event World.
+## Pembaruan Fitur Terbaru (v1.2.0)
+1. **Daftar Multi-World Save Berbasis Tabel Interaktif**:
+   - Setiap Save World memiliki opsi tipe penyimpanan tersendiri: `ALL` (Block + Seed), `BLOCK` saja, atau `SEED` saja.
+   - Dilengkapi tombol navigasi atas/bawah, hapus baris, dan penambahan cepat dari world aktif saat ini.
+2. **Perbaikan Tampilan & Anti-Teks Terpotong**:
+   - Label tombol disederhanakan (`[ Gabung ]`, `[ Block ]`, `[ Seed ]`) dan jarak layout dirapikan dengan `uiGap()`, mencegah teks terpotong di layar HP Android.
+3. **Limit Item per World yang Fleksibel**:
+   - Limit dapat diatur secara kustom via Input Angka atau tombol cepat (`10.000`, `20.000`, `50.000`, `Unlimited`).
+4. **Default Drop Threshold 200 Block**:
+   - Threshold tas default diset ke **200 block** untuk efisiensi drop maksimal.
+5. **Daftar Multi-World Event dengan Limit Total**:
+   - World event (Mooncake dll.) kini berbentuk tabel interaktif dengan limit total item per world.
+   - Preset 5 jenis Mooncake (`1058,1094,1096,1098,1828`) siap pakai 1x klik.
+6. **Integrasi Magni + Fuel & Gear Equip ID List**:
+   - Restock **Magnifying Glass (1252)** dan **Fuel Pack (1746)** disatukan dalam 1 tombol praktis.
+   - Peralatan panen (DCS, Harvester, dll.) kini berupa kolom daftar ID fleksibel (`gear_equip_ids`) dengan preset cepat: `DCS + Harvester (6840, 1966)`, `Harvester Saja (1966)`, `DCS Saja (6840)`.
+7. **Standarisasi Tampilan Sesuai Skrip Modern**:
+   - Tipografi rapi, pembatas visual jelas, palet warna serasi (Neon Cyan/Purple/Dark Glass), dan navigasi dual interface: Standalone Dear ImGui + Native Growlauncher 5-Tab Menu.
 
 ## Cara Pakai
-Jalankan `loader_harvest.lua` di Growlauncher.
+Jalankan `loader_harvest.lua` di Growlauncher untuk mengunduh versi terbaru secara otomatis langsung dari GitHub.

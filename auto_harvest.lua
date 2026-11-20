@@ -2085,8 +2085,23 @@ function onDrawImGui()
     if not HV.STATE.show_ui then return end
     if not ImGui or not ImGui.Begin then return end
     pcall(function()
-        local opened = ImGui.Begin("BOREN STORE - AUTO HARVEST PRO v" .. HV.VERSION)
+        local winFlags = 2048 -- ImGuiWindowFlags_HorizontalScrollbar
+        if ImGui.WindowFlags and ImGui.WindowFlags.HorizontalScrollbar then
+            winFlags = tonumber(ImGui.WindowFlags.HorizontalScrollbar) or 2048
+        end
+        local MIN_CONTENT_W = 680
+        if ImGui.SetNextWindowContentSize and ImVec2 then
+            pcall(ImGui.SetNextWindowContentSize, ImVec2(MIN_CONTENT_W, 0))
+        end
+        local okCall, opened = pcall(ImGui.Begin, "BOREN STORE - AUTO HARVEST PRO v" .. HV.VERSION, true, winFlags)
+        if not okCall or opened == nil then
+            okCall, opened = pcall(ImGui.Begin, "BOREN STORE - AUTO HARVEST PRO v" .. HV.VERSION, winFlags)
+        end
+        if not okCall or opened == nil then
+            okCall, opened = pcall(ImGui.Begin, "BOREN STORE - AUTO HARVEST PRO v" .. HV.VERSION)
+        end
         if opened then
+            if ImGui.Dummy and ImVec2 then pcall(ImGui.Dummy, ImVec2(MIN_CONTENT_W, 0.1)) end
             renderHarvestBody()
             ImGui.End()
         end

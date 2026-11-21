@@ -43,6 +43,8 @@ HV.CFG = {
     loop_enabled       = false,
     auto_collect       = true,
     collect_range      = 4,
+    take_block         = true,          -- Opsi ambil block hasil panen sesuai ID
+    take_seed          = true,          -- Opsi ambil seed hasil panen sesuai ID,
     event_ids_raw      = "1058,1094,1096,1098,1828", -- Mooncakes default
     event_threshold    = 150,
     gear_world         = "",            -- 1 world khusus Magni / Fuel Pack / Gear
@@ -50,6 +52,7 @@ HV.CFG = {
     fuel_target_amt    = 100,
     stop_if_no_fuel    = true,          -- Proteksi: stop aman jika Fuel Pack habis di tas & Gear World
     gear_equip_ids     = "6840, 1966",  -- List ID alat/gear to equip (DCS, Harvester, dll.)
+    use_dcs_harvester  = false,          -- Default OFF: Gunakan DCS & Harvester (Hand/Back)
     take_floating      = true,          -- Sapu sisa block/seed/event setelah tree habis
 }
 
@@ -64,6 +67,7 @@ HV.STATE = {
     event_rows       = {},              -- { { name="W", door="D", limit=10000, count=0, status="Ready" }, ... }
     selected_ev      = 0,
     anti_take        = false,
+    is_dropping      = false,
     pending_drop_id  = 0,
     pending_drop_amt = 0,
     drop_confirmed   = false,
@@ -161,33 +165,124 @@ local function isSystemWindows()
     return false
 end
 
-local function getDataPath()
-    if CACHED_PATH then return CACHED_PATH end
-    if isSystemWindows() then CACHED_PATH = "boren_hub_harvest_data.txt"; return CACHED_PATH end
-    local dirs = {
-        "/storage/emulated/0/Android/media/launcher.powerkuy.growlauncher/ScriptLua/",
-        "/storage/emulated/0/Android/data/launcher.powerkuy.growlauncher/files/ScriptLua/",
-        "/storage/emulated/0/Download/",
-    }
-    for _, d in ipairs(dirs) do
-        local p = d .. "boren_hub_harvest_data.txt"
-        local ok, f = pcall(io.open, p, "a")
-        if ok and f then f:close(); CACHED_PATH = p; return p end
+local function splitColons(str)
+    local parts = {}
+    for seg in (tostring(str or "") .. ":"):gmatch("([^:]*):") do
+        table.insert(parts, trimStr(seg))
     end
-    CACHED_PATH = "boren_hub_harvest_data.txt"
-    return CACHED_PATH
+    if #parts > 0 and parts[#parts] == "" then
+        table.remove(parts)
+    end
+    return parts
+end
+
+local function getStorageCandidates()
+    local fn = "boren_hub_harvest_data.txt"
+    if isSystemWindows() then
+        return { fn }
+    end
+    return {
+        "/storage/emulated/0/Download/" .. fn,
+        "/sdcard/Download/" .. fn,
+        "/storage/emulated/0/Android/media/launcher.powerkuy.growlauncher/ScriptLua/" .. fn,
+        "/storage/emulated/0/Android/data/launcher.powerkuy.growlauncher/files/ScriptLua/" .. fn,
+        fn,
+    }
+end
+
+local function readStorageContent()
+    local candidates = getStorageCandidates()
+    -- 1. Baca via readFile native GrowLauncher jika tersedia
+    if readFile then
+        for _, path in ipairs(candidates) do
+            local ok, txt = pcall(readFile, path)
+            if ok and type(txt) == "string" and (txt:find("ROW=", 1, true) or #txt > 10) then
+                return txt
+            end
+        end
+    end
+    -- 2. Baca via io.open
+    if io and io.open then
+        for _, path in ipairs(candidates) do
+            local ok, f = pcall(io.open, path, "r")
+            if ok and f then
+                local txt = nil
+                pcall(function() txt = f:read("*a"); f:close() end)
+                if txt and type(txt) == "string" and (txt:find("ROW=", 1, true) or #txt > 10) then
+                    return txt
+                end
+            end
+        end
+    end
+    -- 3. Fallback: baca file apa pun yang berhasil terbuka dan tidak kosong
+    if io and io.open then
+        for _, path in ipairs(candidates) do
+            local ok, f = pcall(io.open, path, "r")
+            if ok and f then
+                local txt = nil
+                pcall(function() txt = f:read("*a"); f:close() end)
+                if txt and type(txt) == "string" and txt ~= "" then
+                    return txt
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function writeStorageContent(content)
+    local candidates = getStorageCandidates()
+    local wroteAny = false
+
+    -- 1. Tulis via native writeFile jika tersedia di engine
+    if writeFile then
+        for _, path in ipairs(candidates) do
+            local ok = pcall(writeFile, path, content)
+            if ok then wroteAny = true end
+        end
+    end
+    if writeToLocal then
+        pcall(writeToLocal, "boren_hub_harvest_data.txt", content)
+        wroteAny = true
+    end
+
+    -- 2. Tulis via io.open ke seluruh direktori yang dapat diakses (Download HP, media, local)
+    if io and io.open then
+        for _, path in ipairs(candidates) do
+            local ok, f = pcall(io.open, path, "w")
+            if ok and f then
+                pcall(function()
+                    f:write(content .. "\n")
+                    f:close()
+                end)
+                wroteAny = true
+            end
+        end
+    end
+    return wroteAny
+end
+
+local function getDataPath()
+    local candidates = getStorageCandidates()
+    for _, path in ipairs(candidates) do
+        local ok, f = pcall(io.open, path, "r")
+        if ok and f then f:close(); return path end
+    end
+    for _, path in ipairs(candidates) do
+        local ok, f = pcall(io.open, path, "a")
+        if ok and f then f:close(); return path end
+    end
+    return "boren_hub_harvest_data.txt"
 end
 
 local function parseWorldDoor(raw)
     local s = trimStr(raw):gsub("|", ":")
     if s == "" or s:sub(1, 1) == "#" then return nil end
-    local w, d = s:match("^([^:]+):(.*)$")
-    if w then
-        w = cleanWorldName(w); d = cleanWorldName(d)
-        return (w ~= "") and { name = w, door = d } or nil
-    end
-    local wn = cleanWorldName(s)
-    return (wn ~= "") and { name = wn, door = "" } or nil
+    local parts = splitColons(s)
+    local w = cleanWorldName(parts[1] or "")
+    if w == "" then return nil end
+    local door = cleanWorldName(parts[2] or "")
+    return { name = w, door = door }
 end
 
 local function parseWorldList(raw)
@@ -202,10 +297,7 @@ end
 local function parseFarmRow(raw)
     local s = trimStr(raw):gsub("|", ":")
     if s == "" or s:sub(1, 1) == "#" then return nil end
-    local parts = {}
-    for tok in s:gmatch("[^:]+") do
-        table.insert(parts, trimStr(tok))
-    end
+    local parts = splitColons(s)
     local w = cleanWorldName(parts[1] or "")
     if w == "" then return nil end
     local door = cleanWorldName(parts[2] or "")
@@ -217,10 +309,7 @@ end
 local function parseSaveRow(raw)
     local s = trimStr(raw):gsub("|", ":")
     if s == "" or s:sub(1, 1) == "#" then return nil end
-    local parts = {}
-    for tok in s:gmatch("[^:]+") do
-        table.insert(parts, trimStr(tok))
-    end
+    local parts = splitColons(s)
     local w = cleanWorldName(parts[1] or "")
     if w == "" then return nil end
     local door = cleanWorldName(parts[2] or "")
@@ -241,10 +330,7 @@ end
 local function parseEventRow(raw)
     local s = trimStr(raw):gsub("|", ":")
     if s == "" or s:sub(1, 1) == "#" then return nil end
-    local parts = {}
-    for tok in s:gmatch("[^:]+") do
-        table.insert(parts, trimStr(tok))
-    end
+    local parts = splitColons(s)
     local w = cleanWorldName(parts[1] or "")
     if w == "" then return nil end
     local door = cleanWorldName(parts[2] or "")
@@ -289,10 +375,13 @@ function HV.saveData()
         "EVTH="     .. tostring(c.event_threshold),
         "GEARW="    .. tostring(c.gear_world or ""),
         "AMAGFUEL=" .. (c.auto_magni_fuel and "1" or "0"),
+        "USEDCS="   .. (c.use_dcs_harvester and "1" or "0"),
         "GEAREQUIP=".. tostring(c.gear_equip_ids or ""),
         "FUELAMT="  .. tostring(c.fuel_target_amt),
         "STPFUEL="  .. (c.stop_if_no_fuel and "1" or "0"),
         "FLOAT="    .. (c.take_floating and "1" or "0"),
+        "TAKEBLOCK=".. (c.take_block ~= false and "1" or "0"),
+        "TAKESEED=" .. (c.take_seed ~= false and "1" or "0"),
     }
     for _, r in ipairs(HV.STATE.rows) do
         table.insert(lines, string.format("ROW=%s:%s:%d|%s", r.name, r.door or "", r.item_id or c.default_item_id, r.status or "Ready"))
@@ -304,21 +393,18 @@ function HV.saveData()
         table.insert(lines, string.format("EVROW=%s:%s:%d:%d|%s", r.name, r.door or "", r.limit or 10000, r.count or 0, r.status or "Ready"))
     end
 
-    local ok, f = pcall(io.open, getDataPath(), "w")
-    if ok and f then f:write(table.concat(lines, "\n")); f:close() end
+    local textContent = table.concat(lines, "\n")
+    writeStorageContent(textContent)
 end
 
 function HV.loadData()
-    local ok, f = pcall(io.open, getDataPath(), "r")
-    if not ok or not f then return end
-    local txt = f:read("*a"); f:close()
+    local txt = readStorageContent()
     if not txt or txt == "" then return end
     local c = HV.CFG
-    HV.STATE.rows       = {}
-    HV.STATE.save_rows  = {}
-    HV.STATE.event_rows = {}
 
+    local loadedRows, loadedSaveRows, loadedEventRows = {}, {}, {}
     local legacySaveStr, legacyEventStr = "", ""
+
     for line in txt:gmatch("[^\r\n]+") do
         local k, v = line:match("^([A-Z]+)=(.*)$")
         if k == "DEFID" then c.default_item_id = tonumber(v) or 4584
@@ -336,42 +422,56 @@ function HV.loadData()
         elseif k == "EVTH" then c.event_threshold = tonumber(v) or 150
         elseif k == "GEARW" then c.gear_world = trimStr(v)
         elseif k == "AMAGFUEL" then c.auto_magni_fuel = (v == "1")
+        elseif k == "USEDCS" then c.use_dcs_harvester = (v == "1")
         elseif k == "GEAREQUIP" then c.gear_equip_ids = trimStr(v)
         elseif k == "FUELAMT" then c.fuel_target_amt = tonumber(v) or 100
         elseif k == "STPFUEL" then c.stop_if_no_fuel = (v ~= "0")
         elseif k == "FLOAT" then c.take_floating = (v ~= "0")
+        elseif k == "TAKEBLOCK" then c.take_block = (v ~= "0")
+        elseif k == "TAKESEED"  then c.take_seed  = (v ~= "0")
         elseif k == "MAGNI" or k == "FUEL" then if v == "1" then c.auto_magni_fuel = true end
         elseif k == "SAVEW" then legacySaveStr = trimStr(v)
         elseif k == "EVW" then legacyEventStr = trimStr(v)
         elseif k == "ROW" then
             local wd, st = v:match("^(.-)|(.*)$")
             local p = parseFarmRow(wd or v)
-            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(HV.STATE.rows, p) end
+            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(loadedRows, p) end
         elseif k == "SAVEROW" then
             local wd, st = v:match("^(.-)|(.*)$")
             local p = parseSaveRow(wd or v)
-            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(HV.STATE.save_rows, p) end
+            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(loadedSaveRows, p) end
         elseif k == "EVROW" then
             local wd, st = v:match("^(.-)|(.*)$")
             local p = parseEventRow(wd or v)
-            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(HV.STATE.event_rows, p) end
+            if p then p.status = (st and st ~= "") and st or "Ready"; table.insert(loadedEventRows, p) end
         end
     end
 
     -- Migrasi format legacy ke list tables bila sebelumnya berupa string
-    if #HV.STATE.save_rows == 0 and legacySaveStr ~= "" then
+    if #loadedSaveRows == 0 and legacySaveStr ~= "" then
         for _, sw in ipairs(parseWorldList(legacySaveStr)) do
-            table.insert(HV.STATE.save_rows, { name = sw.name, door = sw.door or "", save_type = "ALL", limit = c.default_save_limit, count = 0, status = "Ready" })
+            table.insert(loadedSaveRows, { name = sw.name, door = sw.door or "", save_type = "ALL", limit = c.default_save_limit, count = 0, status = "Ready" })
         end
     end
-    if #HV.STATE.event_rows == 0 and legacyEventStr ~= "" then
+    if #loadedEventRows == 0 and legacyEventStr ~= "" then
         for _, ew in ipairs(parseWorldList(legacyEventStr)) do
-            table.insert(HV.STATE.event_rows, { name = ew.name, door = ew.door or "", limit = c.default_ev_limit, count = 0, status = "Ready" })
+            table.insert(loadedEventRows, { name = ew.name, door = ew.door or "", limit = c.default_ev_limit, count = 0, status = "Ready" })
         end
     end
 
-    addFarmItemBuf  = tostring(c.default_item_id)
-    addSaveLimitBuf = tostring(c.default_save_limit)
+    -- Update state hanya jika hasil load berisi data atau memory kosong
+    if #loadedRows > 0 or #HV.STATE.rows == 0 then
+        HV.STATE.rows = loadedRows
+    end
+    if #loadedSaveRows > 0 or #HV.STATE.save_rows == 0 then
+        HV.STATE.save_rows = loadedSaveRows
+    end
+    if #loadedEventRows > 0 or #HV.STATE.event_rows == 0 then
+        HV.STATE.event_rows = loadedEventRows
+    end
+
+    addFarmItemBuf   = tostring(c.default_item_id)
+    addSaveLimitBuf  = tostring(c.default_save_limit)
     addEventLimitBuf = tostring(c.default_ev_limit)
 end
 
@@ -393,23 +493,25 @@ local function getPlayerPos()
 end
 
 local function getCurrentWorldSafe()
-    local cw = nil
-    if getRealWorldName then
-        local ok, w = pcall(getRealWorldName)
-        if ok and type(w) == "string" and w ~= "" then cw = w end
-    end
-    if not cw and GetWorld then
-        local ok, w = pcall(GetWorld)
-        if ok and w then
-            local name = w.name or (w.getName and w:getName())
-            if type(name) == "string" and name ~= "" then cw = name end
+    local fns = { getCurrentWorldName, GetWorldName, getWorld, getCurrentWorld, GetWorld }
+    for _, fn in ipairs(fns) do
+        if type(fn) == "function" then
+            local ok, res = pcall(fn)
+            if ok and res ~= nil then
+                if type(res) == "string" then
+                    local nm = cleanWorldName(res)
+                    if nm ~= "" then return nm end
+                elseif type(res) == "table" or type(res) == "userdata" then
+                    local okN, nm = pcall(function() return res.name or res.worldName end)
+                    if okN and type(nm) == "string" then
+                        local c = cleanWorldName(nm)
+                        if c ~= "" then return c end
+                    end
+                end
+            end
         end
     end
-    if not cw and getLocalSafe() then
-        local p = getLocalSafe()
-        if p.world and type(p.world) == "string" and p.world ~= "" then cw = p.world end
-    end
-    return cleanWorldName(cw or "EXIT")
+    return "EXIT"
 end
 
 local function getInvCount(itemID)
@@ -438,6 +540,17 @@ local function setCollectCheats(enable)
     if cheat and cheat.collect then pcall(cheat.collect, v) end
     if setCheat then pcall(setCheat, "collect", v) end
     if autoCollect then pcall(autoCollect, v) end
+    if bot then
+        pcall(function()
+            if bot.auto_collect ~= nil then bot.auto_collect = v end
+            if bot.collect ~= nil then bot.collect = v end
+            if bot.anti_collect ~= nil then bot.anti_collect = not v end
+        end)
+    end
+    if editToggle then
+        pcall(editToggle, "Auto Collect", v)
+        pcall(editToggle, "Anti Collect", not v)
+    end
 end
 
 local function setConnWarping(isWarping)
@@ -464,16 +577,26 @@ local function getTileSafe(x, y)
 end
 
 local function forEachWorldObject(callback)
-    if not getObjects then return end
-    local ok, objs = pcall(getObjects)
+    local getFn = getObjectList or getObjects or getWorldObjects
+    if not getFn then return end
+    local ok, objs = pcall(getFn)
     if not ok or type(objs) ~= "table" then return end
-    for _, o in pairs(objs) do
-        local oid = o.id or o.itemid or o.itemID
-        local uid = o.oid or o.uid or o.objID
-        local amt = o.count or o.amount or 1
-        local ox  = o.posX or (o.pos and o.pos.x) or 0
-        local oy  = o.posY or (o.pos and o.pos.y) or 0
-        if oid and uid then callback(tonumber(oid), tonumber(uid), tonumber(amt), ox, oy) end
+    local container = objs
+    pcall(function()
+        if type(objs) == "table" and objs.objects then container = objs.objects end
+    end)
+
+    for _, o in pairs(container) do
+        if type(o) == "table" or type(o) == "userdata" then
+            local itemID = tonumber(o.itemid or o.itemId or o.itemID or o.item_id)
+            local objUID = tonumber(o.id or o.oid or o.uid or o.objID)
+            local amt    = tonumber(o.count or o.amount or 1) or 1
+            local ox     = (o.pos and tonumber(o.pos.x)) or tonumber(o.posX or o.x) or 0
+            local oy     = (o.pos and tonumber(o.pos.y)) or tonumber(o.posY or o.y) or 0
+            if itemID and objUID then
+                callback(itemID, objUID, amt, ox, oy)
+            end
+        end
     end
 end
 
@@ -493,24 +616,108 @@ local function isTileBlocked(x, y)
     return false
 end
 
-local unreachableMap = {}
-local function moveSafeTo(tx, ty)
-    if unreachableMap[tx .. ":" .. ty] then return false end
-    if tx < 0 or tx > 99 or ty < 0 or ty > 59 then return false end
-    if FindPath then
-        local ok, r = pcall(FindPath, tx, ty)
-        if ok and r == false then
-            unreachableMap[tx .. ":" .. ty] = true
-            return false
+local function moveSafeTo(tx, ty, exact)
+    if not HV.STATE.running then return false end
+    tx = math.max(0, math.min(99, math.floor(tx or 0)))
+    ty = math.max(0, math.min(53, math.floor(ty or 0)))
+
+    local curPx, curPy = getPlayerPos()
+    if exact then
+        if curPx == tx and curPy == ty then return true end
+    else
+        if curPx and curPy and math.abs(curPx - tx) <= 1 and math.abs(curPy - ty) <= 1 then
+            return true
         end
     end
-    local px, py = getPlayerPos()
-    if math.abs(px - tx) <= 1 and math.abs(py - ty) <= 1 then return true end
-    safeSleep(tonumber(HV.CFG.step_delay) or 110)
-    local npx, npy = getPlayerPos()
-    local moved = (math.abs(npx - tx) < math.abs(px - tx)) or (math.abs(npy - ty) < math.abs(py - ty)) or (npx == tx and npy == ty)
-    if not moved then unreachableMap[tx .. ":" .. ty] = true end
-    return moved
+
+    local sx, sy = tx, ty
+    if not exact then
+        local t = getTileSafe(tx, ty)
+        if t and t.collidable then
+            local tUp = getTileSafe(tx, ty - 1)
+            if tUp and not tUp.collidable then sx, sy = tx, ty - 1 end
+        end
+    end
+
+    local pFn = FindPath or findPath
+    if not pFn then return false end
+    if HV.CFG.use_modfly and editToggle then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+
+    local startPx, startPy = getPlayerPos()
+    local totalDist = math.max(math.abs((startPx or 0) - sx), math.abs((startPy or 0) - sy))
+
+    if totalDist <= 3 then
+        pcall(pFn, sx, sy)
+        local maxWait = math.max(160, (tonumber(HV.CFG.step_delay) or 110) * 3)
+        local waited = 0
+        while waited < maxWait and HV.STATE.running do
+            local px, py = getPlayerPos()
+            if exact then
+                if px == sx and py == sy then
+                    safeSleep(HV.CFG.step_delay or 40)
+                    return true
+                end
+            else
+                if px and py and math.abs(px - sx) <= 1 and math.abs(py - sy) <= 1 then
+                    safeSleep(HV.CFG.step_delay or 40)
+                    return true
+                end
+            end
+            safeSleep(25)
+            waited = waited + 25
+        end
+        local fx, fy = getPlayerPos()
+        if exact then
+            return (fx == sx and fy == sy)
+        else
+            return (fx and fy and math.abs(fx - sx) <= 1 and math.abs(fy - sy) <= 1)
+        end
+    end
+
+    pcall(pFn, sx, sy)
+    local maxWaitFar = math.max(2500, math.min(15000, totalDist * 180))
+    local waitedFar = 0
+    local lastPx, lastPy = startPx, startPy
+    local stuckTicks = 0
+
+    while waitedFar < maxWaitFar and HV.STATE.running do
+        safeSleep(60)
+        waitedFar = waitedFar + 60
+        local nx, ny = getPlayerPos()
+        if nx and ny then
+            if exact then
+                if nx == sx and ny == sy then
+                    safeSleep(HV.CFG.step_delay or 50)
+                    return true
+                end
+            else
+                if math.abs(nx - sx) <= 1 and math.abs(ny - sy) <= 1 then
+                    safeSleep(HV.CFG.step_delay or 50)
+                    return true
+                end
+            end
+            if nx == lastPx and ny == lastPy then
+                stuckTicks = stuckTicks + 1
+                if stuckTicks >= 10 then
+                    pcall(pFn, sx, sy)
+                    stuckTicks = 0
+                end
+            else
+                stuckTicks = 0
+                lastPx, lastPy = nx, ny
+            end
+        end
+    end
+    local fx, fy = getPlayerPos()
+    if exact then
+        return (fx == sx and fy == sy)
+    else
+        return (fx and fy and math.abs(fx - sx) <= 1 and math.abs(fy - sy) <= 1)
+    end
 end
 
 local function warpToWorldInner(wName, doorID)
@@ -519,7 +726,8 @@ local function warpToWorldInner(wName, doorID)
     unreachableMap = {}
     if getCurrentWorldSafe() == wName and doorID == "" then return true end
     if HUB_REF and HUB_REF.conn and HUB_REF.conn.isPlayerOnline and (not HUB_REF.conn.isPlayerOnline()) and (not HUB_REF.conn.isReconnecting()) then
-        local okOn = HUB_REF.conn.ensureOnline({ world = "", isRunning = function() return HV.STATE.running end })
+        local okOn = HUB_REF.conn.ensureOnline({ world = "", isRunning = function() HV.handleSendPacket = onSendPacketHook
+return HV.STATE.running end })
         if not okOn then return false end
     end
     local joinStr = (doorID ~= "") and (wName .. "|" .. doorID) or wName
@@ -574,7 +782,7 @@ local function punchTile(tx, ty)
 end
 
 local function collectNearbyAllowed(allowedSet, radiusTiles)
-    if not HV.CFG.auto_collect or not sendPacketRaw then return end
+    if not HV.CFG.auto_collect then return end
     local px, py = getPlayerPos()
     local rad = radiusTiles or (tonumber(HV.CFG.collect_range) or 4)
     forEachWorldObject(function(oid, uid, _, ox, oy)
@@ -583,7 +791,11 @@ local function collectNearbyAllowed(allowedSet, radiusTiles)
             local otx = math.floor((ox + 10) / 32)
             local oty = math.floor((oy + 10) / 32)
             if math.abs(otx - px) <= rad and math.abs(oty - py) <= rad then
-                pcall(sendPacketRaw, false, { type = 11, value = uid, x = ox, y = oy })
+                if sendPacketRaw then
+                    pcall(sendPacketRaw, false, { type = 11, value = uid, x = ox, y = oy })
+                end
+                if collectObject then pcall(collectObject, uid)
+                elseif CollectObject then pcall(CollectObject, uid) end
             end
         end
     end)
@@ -624,6 +836,10 @@ end
 
 local function onSendPacketRawHook(raw)
     if not HV.STATE.running then return end
+    -- Blokir packet pickup (11) selama bot sedang drop agar tidak mengambil kembali item yang di-drop
+    if (HV.STATE.is_dropping or HV.STATE.anti_take) and raw and raw.type == 11 then
+        return true
+    end
     if raw and raw.type == 10 and raw.value then
         if raw.value == ITEM.SORROWS or raw.value == ITEM.HARVESTER then
             if not HV.STATE.need_fuel then addLog("`2[Harvester] Berhasil equip Harvester!") end
@@ -639,98 +855,382 @@ local function onSendPacketRawHook(raw)
     end
 end
 
-local function waitInvDropTo(itemID, targetMax, timeoutMs)
-    local elapsed = 0
-    while elapsed < timeoutMs do
-        safeSleep(60); elapsed = elapsed + 60
-        if getInvCount(itemID) <= targetMax or HV.STATE.drop_confirmed then return true end
-    end
-    return getInvCount(itemID) <= targetMax
+-- ============================================================================
+-- NATIVE CLIENT DIALOG & KEYBOARD INPUT BRIDGE
+-- ============================================================================
+local activeNativeDialogs = {}
+
+local function sanitizeDialogVal(s)
+    return tostring(s or ""):gsub("[\r\n|]+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local function findCleanDropPositions()
-    local spots = {}
-    local px, py = getPlayerPos()
-    local startX = math.max(2, math.min(94, px))
-    local startY = math.max(2, math.min(54, py))
-    for r = 0, 8 do
-        for dy = -r, r do
-            for dx = -r, r do
-                if math.abs(dx) == r or math.abs(dy) == r then
-                    local sx, sy = startX + dx, startY + dy
-                    if sx >= 2 and sx <= 97 and sy >= 2 and sy <= 55 then
-                        if not isTileBlocked(sx, sy) and not isTileBlocked(sx, sy + 1) then
-                            table.insert(spots, { x = sx, y = sy })
-                            if #spots >= 16 then return spots end
-                        end
+local function showClientDialog(dText)
+    if not dText or dText == "" then return false end
+    if growtopia and type(growtopia.sendDialog) == "function" then
+        local ok = pcall(growtopia.sendDialog, dText)
+        if ok then return true end
+    end
+    if sendVariant then
+        local ok0 = pcall(sendVariant, { v0 = "OnDialogRequest", v1 = dText })
+        if ok0 then return true end
+        local ok1 = pcall(sendVariant, { v1 = "OnDialogRequest", v2 = dText })
+        if ok1 then return true end
+        local okNum = pcall(sendVariant, { [0] = "OnDialogRequest", [1] = dText })
+        if okNum then return true end
+    end
+    if sendVariantList then
+        local okList = pcall(sendVariantList, { [0] = "OnDialogRequest", [1] = dText })
+        if okList then return true end
+    end
+    if sendDialog then
+        pcall(sendDialog, dText)
+        return true
+    end
+    return false
+end
+
+local function openNativeInputDialog(dialogId, title, fields, submitLabel, onSubmit)
+    activeNativeDialogs[dialogId] = onSubmit
+    local lines = {
+        "set_default_color|`o",
+        "add_label_with_icon|big|`cBOREN HARVEST - " .. sanitizeDialogVal(title) .. "|left|3802|",
+        "add_spacer|small|",
+    }
+    for _, f in ipairs(fields or {}) do
+        local fid = tostring(f.id or "f")
+        local flb = sanitizeDialogVal(f.label or fid)
+        local fdv = sanitizeDialogVal(f.default or "")
+        local fln = tonumber(f.maxLen) or 48
+        lines[#lines + 1] = string.format("add_text_input|%s|%s:|%s|%d|", fid, flb, fdv, fln)
+    end
+    lines[#lines + 1] = "add_spacer|small|"
+    lines[#lines + 1] = "add_smalltext|`7Ketik dengan keyboard HP Anda lalu tekan tombol di bawah.|"
+    lines[#lines + 1] = "end_dialog|" .. dialogId .. "|Batal|" .. sanitizeDialogVal(submitLabel or "Masukkan ke Form") .. "|"
+    local dText = table.concat(lines, "\n")
+    showClientDialog(dText)
+end
+
+local function onSendPacketHook(p1, p2)
+    local packet = (type(p2) == "string") and p2 or ((type(p1) == "string") and p1 or nil)
+    if not packet then return false end
+    if packet:find("action|dialog_return", 1, true) then
+        local dlgName = packet:match("dialog_name|([^\r\n|]+)")
+        if dlgName then
+            local cb = activeNativeDialogs[dlgName] or (_G.__BOREN_ACTIVE_NATIVE_DIALOGS and _G.__BOREN_ACTIVE_NATIVE_DIALOGS[dlgName])
+            if cb then
+                activeNativeDialogs[dlgName] = nil
+                if _G.__BOREN_ACTIVE_NATIVE_DIALOGS then _G.__BOREN_ACTIVE_NATIVE_DIALOGS[dlgName] = nil end
+                local fields = {}
+                for line in packet:gmatch("[^\r\n]+") do
+                    local k, v = line:match("^([^|]+)|(.*)$")
+                    if k and k ~= "" then
+                        k = k:gsub("^%s+", ""):gsub("%s+$", "")
+                        v = tostring(v or ""):gsub("|$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+                        fields[k] = v
                     end
+                end
+                local btn = tostring(fields.buttonClicked or ""):lower()
+                if btn ~= "batal" and btn ~= "cancel" and btn ~= "close" then
+                    pcall(cb, fields)
+                end
+                if HV and HV.STATE and HV.STATE._saved_ui_state ~= nil then
+                    HV.STATE.show_ui = HV.STATE._saved_ui_state
+                    HV.STATE._saved_ui_state = nil
+                elseif HV and HV.STATE and HV.STATE.show_ui ~= nil then
+                    HV.STATE.show_ui = true
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Registrasi Global & Engine Hooks
+if AddHook then
+    pcall(AddHook, "OnSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
+    pcall(AddHook, "OnVariantList", "boren_hv_var_hook", onVariantHook)
+    pcall(AddHook, "OnSendPacket", "boren_hv_send_hook", onSendPacketHook)
+elseif addHook then
+    pcall(addHook, onSendPacketRawHook, "onsendpacketraw")
+    pcall(addHook, "onSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
+    pcall(addHook, "OnSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
+    pcall(addHook, onVariantHook, "onvariantlist")
+    pcall(addHook, "onVariantList", "boren_hv_var_hook", onVariantHook)
+    pcall(addHook, "OnVariantList", "boren_hv_var_hook", onVariantHook)
+    pcall(addHook, onSendPacketHook, "onsendpacket")
+    pcall(addHook, "onSendPacket", "boren_hv_send_hook", onSendPacketHook)
+    pcall(addHook, "OnSendPacket", "boren_hv_send_hook", onSendPacketHook)
+end
+onSendPacketRaw = onSendPacketRawHook
+OnSendPacketRaw = onSendPacketRawHook
+onSendPacket = onSendPacketHook
+OnSendPacket = onSendPacketHook
+if applyHook then pcall(applyHook) end
+if ApplyHook then pcall(ApplyHook) end
+
+-- ============================================================================
+-- 4. DROP ENGINE (DROP SEBELAH DOOR, DARI KANAN KE KIRI, ZIGZAG TINGKAT KE ATAS/BAWAH)
+-- ============================================================================
+local function countDroppedOnTile(tx, ty)
+    local total = 0
+    forEachWorldObject(function(oid, uid, amt, ox, oy)
+        local otx = math.floor(((ox or 0) + 10) / 32)
+        local oty = math.floor(((oy or 0) + 10) / 32)
+        if otx == tx and oty == ty then
+            total = total + (tonumber(amt) or 1)
+        end
+    end)
+    return total
+end
+
+local function isTileCleanForDrop(tx, ty, doorX, doorY)
+    if tx < 2 or tx > 97 or ty < 1 or ty > 53 then return false end
+    if tx == doorX and ty == doorY then return false end
+    if isTileBlocked(tx, ty) then return false end
+    local t = getTileSafe(tx, ty)
+    if t and t.collidable then return false end
+    return true
+end
+
+local function isTileCleanForStand(tx, ty, doorX, doorY)
+    if tx < 2 or tx > 98 or ty < 1 or ty > 53 then return false end
+    if tx == doorX and ty == doorY then return false end
+    if isTileBlocked(tx, ty) then return false end
+    local t = getTileSafe(tx, ty)
+    if t and t.collidable then return false end
+    return true
+end
+
+local function faceLeft(standX, standY)
+    if sendPacketRaw then
+        pcall(sendPacketRaw, false, {
+            type  = 0,
+            pos   = { x = standX * 32, y = standY * 32 },
+            x     = standX * 32,
+            y     = standY * 32,
+            state = 48 -- 48 = Flipped / Menghadap ke kiri
+        })
+    end
+end
+
+local function moveToStand(standX, standY)
+    if not HV.STATE.running then return false end
+    standX = math.max(2, math.min(98, math.floor(standX or 0)))
+    standY = math.max(1, math.min(53, math.floor(standY or 0)))
+
+    if editToggle then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+
+    local curPx, curPy = getPlayerPos()
+    if curPx == standX and curPy == standY then
+        faceLeft(standX, standY)
+        return true
+    end
+
+    local pFn = FindPath or findPath
+    if pFn then
+        pcall(pFn, standX, standY)
+        local waited = 0
+        while waited < 1800 and HV.STATE.running do
+            safeSleep(50)
+            waited = waited + 50
+            local px, py = getPlayerPos()
+            if px == standX and py == standY then
+                faceLeft(standX, standY)
+                safeSleep(40)
+                return true
+            end
+        end
+    end
+
+    moveSafeTo(standX, standY, true)
+    faceLeft(standX, standY)
+    safeSleep(50)
+    local fx, fy = getPlayerPos()
+    return (fx == standX and fy == standY) or (fx and fy and math.abs(fx - standX) <= 1 and math.abs(fy - standY) <= 1)
+end
+
+local function executeDropBatch(itemID, batch)
+    if not HV.STATE.running then return false, 0 end
+    local cur = getInvCount(itemID)
+    if cur <= 0 then return true, 0 end
+    batch = math.min(batch, math.min(200, cur))
+
+    HV.STATE.is_dropping = true
+    HV.STATE.anti_take = true
+    HV.STATE.drop_confirmed = false
+    HV.STATE.pending_drop_id = itemID
+    HV.STATE.pending_drop_amt = batch
+
+    -- Matikan auto-collect & aktifkan anti-collect cheat
+    setCollectCheats(false)
+    safeSleep(50)
+
+    -- Metode 1: Standard action|drop (memicu OnDialogRequest di server)
+    if sendPacket then
+        pcall(sendPacket, 2, "action|drop\n|itemID|" .. tostring(itemID))
+        safeSleep(140)
+    end
+
+    -- Metode 2: C++ engine direct drop confirmation
+    if growtopia and growtopia.confirmDropItem then
+        pcall(growtopia.confirmDropItem, itemID, batch)
+        safeSleep(140)
+    end
+
+    -- Metode 3: Standard packet drop_item / drop dialog return
+    if sendPacket then
+        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop_item\nitemID|%d|\ncount|%d\n", itemID, batch))
+        safeSleep(100)
+        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop\nitemID|%d|\ncount|%d\n", itemID, batch))
+        safeSleep(100)
+    end
+
+    local waited = 0
+    while waited < 850 and HV.STATE.running do
+        safeSleep(50)
+        waited = waited + 50
+        if getInvCount(itemID) < cur or HV.STATE.drop_confirmed then
+            break
+        end
+    end
+
+    HV.STATE.pending_drop_id = 0
+    HV.STATE.pending_drop_amt = 0
+    HV.STATE.is_dropping = false
+    HV.STATE.anti_take = false
+
+    local after = getInvCount(itemID)
+    if after < cur then
+        local delta = cur - after
+        return true, delta
+    end
+    return false, 0
+end
+
+local function dropOntoTileFromRight(dropX, dropY, itemID, maxCanDrop)
+    local standX = dropX + 1
+    local standY = dropY
+
+    local existingOnTile = countDroppedOnTile(dropX, dropY)
+    if existingOnTile >= 4000 then
+        return false, 0, true
+    end
+
+    if not moveToStand(standX, standY) then
+        return false, 0, false
+    end
+    faceLeft(standX, standY)
+
+    local droppedOnTile = 0
+    local failCount = 0
+
+    while HV.STATE.running and failCount < 2 do
+        local curInv = getInvCount(itemID)
+        if curInv <= 0 then
+            return true, droppedOnTile, false
+        end
+
+        local tileSpace = 4000 - (existingOnTile + droppedOnTile)
+        if tileSpace <= 0 then
+            return true, droppedOnTile, true
+        end
+
+        local batch = math.min(200, math.min(curInv, tileSpace))
+        if maxCanDrop and maxCanDrop > 0 then
+            local remainQuota = maxCanDrop - droppedOnTile
+            if remainQuota <= 0 then
+                return true, droppedOnTile, false
+            end
+            batch = math.min(batch, remainQuota)
+        end
+
+        HV.STATE.status_text = string.format("Drop %d ke (%d,%d)...", batch, dropX, dropY)
+        faceLeft(standX, standY)
+        local ok, delta = executeDropBatch(itemID, batch)
+        if ok and delta > 0 then
+            droppedOnTile = droppedOnTile + delta
+            HV.STATE.total_dropped = HV.STATE.total_dropped + delta
+            failCount = 0
+            safeSleep(150)
+            if (existingOnTile + droppedOnTile) >= 4000 then
+                return true, droppedOnTile, true
+            end
+        else
+            failCount = failCount + 1
+            safeSleep(150)
+        end
+    end
+
+    local tileFull = (failCount >= 2) or ((existingOnTile + droppedOnTile) >= 4000)
+    return (droppedOnTile > 0), droppedOnTile, tileFull
+end
+
+local function dropItemAllInCurrentWorld(itemID, label, maxQuota)
+    local cur = getInvCount(itemID)
+    if cur <= 0 then return true, 0 end
+
+    if editToggle then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+    setCollectCheats(false)
+
+    local px, py = getPlayerPos()
+    local doorX, doorY = px or 2, py or 2
+    for dy = -2, 2 do
+        for dx = -2, 2 do
+            local t = getTileSafe(px + dx, py + dy)
+            if t and (tonumber(t.fg) == 6 or tonumber(t.fg) == 8) then
+                doorX, doorY = px + dx, py + dy
+                break
+            end
+        end
+    end
+
+    -- 1. Baris utama sejajar pintu (y = doorY)
+    -- 2. Jika penuh naik satu tingkat lagi (doorY - 1, doorY - 2, ...)
+    -- 3. Jika atas habis, ke bawahnya (doorY + 1, doorY + 2, ...)
+    local candidateRows = { doorY }
+    for y = doorY - 1, 1, -1 do
+        table.insert(candidateRows, y)
+    end
+    for y = doorY + 1, 53 do
+        table.insert(candidateRows, y)
+    end
+
+    local totalDropped = 0
+
+    for _, rowY in ipairs(candidateRows) do
+        if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
+        if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
+
+        -- Sesuai gambar: Drop di sebelah door (area kosong) dari kanan tile target ke kiri
+        local startX = math.max(2, doorX + 1)
+        for dropX = startX, 97 do
+            if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
+            if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
+
+            local standX = dropX + 1
+            if standX <= 98 and isTileCleanForDrop(dropX, rowY, doorX, doorY) and isTileCleanForStand(standX, rowY, doorX, doorY) then
+                local quotaLeft = (maxQuota and maxQuota > 0) and (maxQuota - totalDropped) or nil
+                local ok, droppedAmt, tileFull = dropOntoTileFromRight(dropX, rowY, itemID, quotaLeft)
+                if droppedAmt > 0 then
+                    totalDropped = totalDropped + droppedAmt
                 end
             end
         end
     end
-    if #spots == 0 then table.insert(spots, { x = startX, y = startY }) end
-    return spots
-end
 
-local function dropItemAllInCurrentWorld(itemID, label)
-    local cur = getInvCount(itemID)
-    if cur <= 0 then return true, 0 end
-
-    local spots = findCleanDropPositions()
-    local spotIdx = 1
-    if spots[1] then moveSafeTo(spots[1].x, spots[1].y); safeSleep(150) end
-
-    local droppedTotal = 0
-    local failMove = 0
-    while cur > 0 and HV.STATE.running and failMove < 15 do
-        local batch = math.min(200, cur)
-        HV.STATE.pending_drop_id  = itemID
-        HV.STATE.pending_drop_amt = batch
-        HV.STATE.drop_confirmed   = false
-        HV.STATE.status_text = string.format("Drop %s (%d)...", tostring(label or itemID), batch)
-
-        local ok = false
-        if growtopia and growtopia.confirmDropItem then
-            pcall(growtopia.confirmDropItem, itemID, batch)
-            ok = waitInvDropTo(itemID, cur - 1, 700)
-        end
-        if not ok and sendPacket and HV.STATE.running then
-            HV.STATE.drop_confirmed = false
-            pcall(sendPacket, 2, "action|drop\n|itemID|" .. tostring(itemID))
-            ok = waitInvDropTo(itemID, cur - 1, 950)
-        end
-        if not ok and sendPacket and HV.STATE.running then
-            for _, dn in ipairs({ "drop", "drop_item" }) do
-                pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|%s\nitemID|%d|\ncount|%d\n", dn, itemID, batch))
-                ok = waitInvDropTo(itemID, cur - 1, 650)
-                if ok then break end
-            end
-        end
-
-        HV.STATE.pending_drop_id  = 0
-        HV.STATE.pending_drop_amt = 0
-
-        local after = getInvCount(itemID)
-        if after < cur then
-            droppedTotal = droppedTotal + (cur - after)
-            HV.STATE.total_dropped = HV.STATE.total_dropped + (cur - after)
-            cur = after
-            safeSleep(180)
-        else
-            failMove = failMove + 1
-            spotIdx = spotIdx + 1
-            if spots[spotIdx] then
-                moveSafeTo(spots[spotIdx].x, spots[spotIdx].y)
-            else
-                local px, py = getPlayerPos()
-                local nx = (px < 94) and (px + 2) or 2
-                local ny = (px < 94) and py or math.max(2, py - 2)
-                moveSafeTo(nx, ny)
-            end
-            safeSleep(220)
-        end
-    end
-    return (getInvCount(itemID) == 0), droppedTotal
+    HV.STATE.is_dropping = false
+    HV.STATE.anti_take = false
+    local remaining = getInvCount(itemID)
+    return (remaining == 0), totalDropped
 end
 
 local function dropToSaveWorlds(blockID, seedID, returnFarm)
@@ -788,7 +1288,8 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
                     targetRow.status = "Full"
                     HV.saveData()
                 else
-                    local okD = dropItemAllInCurrentWorld(itm.id, itm.name)
+                    local quotaLeft = (lim > 0) and math.max(0, lim - curInWorld) or nil
+                    local okD = dropItemAllInCurrentWorld(itm.id, itm.name, quotaLeft)
                     local afterInWorld = countDroppedObjectsInWorld(filterSet)
                     targetRow.count = afterInWorld
                     if lim > 0 and afterInWorld >= lim then
@@ -826,8 +1327,8 @@ local function dropToEventWorlds(returnFarm)
 
     local rows = HV.STATE.event_rows
     if #rows == 0 then
-        addLog("`4[Event World] Daftar Event Save World kosong! Isi di tab Event Save.")
-        return false
+        addLog("`e[Event World] World Event belum diatur (opsional) — melewati drop event.")
+        return true
     end
 
     for _, itmID in ipairs(toDrop) do
@@ -841,8 +1342,8 @@ local function dropToEventWorlds(returnFarm)
             end
 
             if not targetRow then
-                addLog("`4[Event World] Semua World Event sudah penuh / tidak tersedia!")
-                break
+                addLog("`e[Event World] Semua World Event penuh / tidak tersedia — drop event dilewati.")
+                return true
             end
 
             HV.STATE.status_text = "Drop Event -> " .. targetRow.name
@@ -859,7 +1360,8 @@ local function dropToEventWorlds(returnFarm)
                     targetRow.status = "Full"
                     HV.saveData()
                 else
-                    local okD = dropItemAllInCurrentWorld(itmID, "Item " .. itmID)
+                    local quotaLeft = (lim > 0) and math.max(0, lim - curInWorld) or nil
+                    local okD = dropItemAllInCurrentWorld(itmID, "Item " .. itmID, quotaLeft)
                     local afterInWorld = countDroppedObjectsInWorld(evMap)
                     targetRow.count = afterInWorld
                     if lim > 0 and afterInWorld >= lim then
@@ -917,8 +1419,8 @@ local function ensureGearAndFuel(returnFarm)
         end
     end
 
-    -- 2. Daftar ID Alat untuk Di-equip (DCS, Harvester, dll.)
-    local equipIDs = parseEquipIDs(c.gear_equip_ids)
+    -- 2. Daftar ID Alat untuk Di-equip (DCS, Harvester, dll.) HANYA jika toggle Gunakan DCS aktif!
+    local equipIDs = c.use_dcs_harvester and parseEquipIDs(c.gear_equip_ids) or {}
     for _, eqID in ipairs(equipIDs) do
         if getInvCount(eqID) <= 0 then
             table.insert(needed, { id = eqID, amt = 1, equip = true, name = "Gear " .. tostring(eqID) })
@@ -928,26 +1430,28 @@ local function ensureGearAndFuel(returnFarm)
     -- Jika semua perlengkapan sudah ada di tas
     if #needed == 0 then
         if c.auto_magni_fuel and getInvCount(ITEM.MAGNI) > 0 then equipItem(ITEM.MAGNI); safeSleep(100) end
-        for _, eqID in ipairs(equipIDs) do if getInvCount(eqID) > 0 then equipItem(eqID); safeSleep(100) end end
+        if c.use_dcs_harvester then
+            for _, eqID in ipairs(equipIDs) do if getInvCount(eqID) > 0 then equipItem(eqID); safeSleep(100) end end
+        end
         return true
     end
 
     local gw = parseWorldDoor(c.gear_world)
-    if not gw then
-        if c.auto_magni_fuel and c.stop_if_no_fuel and getInvCount(ITEM.FUEL_PACK) <= 0 then
-            addLog("`4[Fuel Guard] Fuel Pack habis & Gear World belum diatur — bot berhenti aman!")
-            HV.STATE.status_text = "No Fuel Pack"
-            return false
+    if not gw or trimStr(c.gear_world or "") == "" then
+        -- Gear World opsional! Equip perlengkapan yang ada di tas bila tersedia
+        if c.auto_magni_fuel and getInvCount(ITEM.MAGNI) > 0 then equipItem(ITEM.MAGNI); safeSleep(100) end
+        if getInvCount(ITEM.FUEL_PACK) > 0 and HV.STATE.need_fuel then equipItem(ITEM.FUEL_PACK); HV.STATE.need_fuel = false; safeSleep(100) end
+        if c.use_dcs_harvester then
+            for _, eqID in ipairs(equipIDs) do if getInvCount(eqID) > 0 then equipItem(eqID); safeSleep(100) end end
         end
-        addLog("`e[Gear] Gear World belum diatur — melewati restock gear.")
         return true
     end
 
     HV.STATE.status_text = "Gear World: " .. gw.name
     addLog("[Gear] Ambil perlengkapan / fuel di " .. gw.name)
     if not warpToWorld(gw.name, gw.door) then
-        addLog("`4[Gear] Gagal warp ke Gear World " .. gw.name)
-        return false
+        addLog("`e[Gear] Gagal warp ke Gear World " .. gw.name .. " — melanjutkan harvest (Gear World opsional).")
+        return true
     end
 
     setCollectCheats(true)
@@ -972,7 +1476,7 @@ local function ensureGearAndFuel(returnFarm)
         end
     end
 
-    if c.auto_magni_fuel and c.stop_if_no_fuel and getInvCount(ITEM.FUEL_PACK) <= 0 then
+    if c.auto_magni_fuel and c.stop_if_no_fuel and getInvCount(ITEM.FUEL_PACK) <= 0 and (gw and trimStr(c.gear_world or "") ~= "") then
         addLog("`4[Fuel Guard] Stok Fuel Pack habis di tas & Gear World — bot berhenti aman!")
         HV.STATE.status_text = "No Fuel Pack"
         return false
@@ -988,11 +1492,58 @@ end
 -- ============================================================================
 -- 6. HARVEST ENGINE (3-ZIGZAG / 1BY1 + TAKE FLOATING + AUTO DROP)
 -- ============================================================================
-local function isReadyTree(tx, ty, seedID)
-    local t = getTileSafe(tx, ty)
-    if not t or tonumber(t.fg) ~= seedID then return false end
-    if t.readyharvest == true then return true end
+local function isTileTreeReady(t)
+    if not t then return false end
+    if t.readyharvest == true or t.readyharvest == 1 or t.readyharvest == "true" then return true end
+    if t.ready_to_harvest == true or t.ready_to_harvest == 1 then return true end
+    if t.canHarvest and type(t.canHarvest) == "function" then
+        local okH, resH = pcall(t.canHarvest, t)
+        if okH and resH == true then return true end
+    end
     if tonumber(t.progress) and tonumber(t.progress) >= 1.0 then return true end
+    if t.extra and type(t.extra) == "table" then
+        if tonumber(t.extra.growth) == 0 and (tonumber(t.extra.fruitcount) or 0) > 0 then
+            return true
+        end
+    end
+    return false
+end
+
+local function isReadyTree(tx, ty, seedID, blockID)
+    local t = getTileSafe(tx, ty)
+    if not t then return false end
+    local fg = tonumber(t.fg) or 0
+    if fg <= 0 then return false end
+
+    -- Cocokkan fg dengan seedID atau blockID bila disediakan
+    local matchesID = false
+    if seedID and seedID > 0 and fg == seedID then matchesID = true end
+    if (not matchesID) and blockID and blockID > 0 and fg == blockID then matchesID = true end
+
+    -- Jika ID diberikan dan tidak cocok dengan fg, bukan pohon target
+    if (seedID and seedID > 0) and not matchesID then return false end
+
+    return isTileTreeReady(t)
+end
+
+-- Validasi pukulan pohon: memastikan pohon benar-benar telah dipanen (hancur)
+local function harvestTreeTile(tx, ty, seedID, blockID, hDelay)
+    for attempt = 1, 4 do
+        if not HV.STATE.running then return false end
+        punchTile(tx, ty)
+        safeSleep(hDelay)
+
+        -- Validasi: cek apakah pohon di tile (tx, ty) sudah pecah/habis
+        if not isReadyTree(tx, ty, seedID, blockID) then
+            HV.STATE.total_harvested = HV.STATE.total_harvested + 1
+            return true
+        end
+        safeSleep(50)
+    end
+    if not isReadyTree(tx, ty, seedID, blockID) then
+        HV.STATE.total_harvested = HV.STATE.total_harvested + 1
+        return true
+    end
     return false
 end
 
@@ -1073,7 +1624,9 @@ local function processFarmWorld(row)
     if blockID <= 0 then row.status = "Invalid ID"; HV.saveData(); return false end
 
     local eventList, eventMap = parseEventIDs()
-    local allowedSet = { [blockID] = true, [seedID] = true }
+    local allowedSet = {}
+    if HV.CFG.take_block ~= false then allowedSet[blockID] = true end
+    if HV.CFG.take_seed ~= false then allowedSet[seedID] = true end
     for id in pairs(eventMap) do allowedSet[id] = true end
 
     if not ensureGearAndFuel(nil) then return false end
@@ -1086,63 +1639,123 @@ local function processFarmWorld(row)
     setCollectCheats(true)
     safeSleep(500)
 
+    -- Auto-Detect: Cek apakah ada pohon yang cocok di world. Bila 0, scan otomatis pohon matang di world!
+    local initialReady = 0
+    for testY = 1, 53 do
+        for testX = 2, 97 do
+            if isReadyTree(testX, testY, seedID, blockID) then
+                initialReady = initialReady + 1
+                if initialReady >= 1 then break end
+            end
+        end
+        if initialReady >= 1 then break end
+    end
+
+    if initialReady == 0 then
+        local detectedCounts = {}
+        for scY = 1, 53 do
+            for scX = 2, 97 do
+                local t = getTileSafe(scX, scY)
+                if t and isTileTreeReady(t) then
+                    local fg = tonumber(t.fg) or 0
+                    if fg > 0 then
+                        detectedCounts[fg] = (detectedCounts[fg] or 0) + 1
+                    end
+                end
+            end
+        end
+
+        local bestFg, bestCnt = nil, 0
+        for fg, cnt in pairs(detectedCounts) do
+            if cnt > bestCnt then bestFg = fg; bestCnt = cnt end
+        end
+
+        if bestFg and bestCnt > 0 then
+            blockID, seedID = normalizeHarvestPair(bestFg)
+            row.item_id = blockID
+            if HV.CFG.take_block ~= false then allowedSet[blockID] = true end
+            if HV.CFG.take_seed ~= false then allowedSet[seedID] = true end
+            HV.saveData()
+            addLog(string.format("`a[Auto-Detect] Menemukan %d pohon matang di %s -> ID Block: %d, Seed: %d", bestCnt, row.name, blockID, seedID))
+        end
+    end
+
     local hDelay = math.max(90, tonumber(HV.CFG.harvest_delay) or 180)
     local isZigzag = (HV.CFG.harvest_mode == "3zigzag")
-    local rowCount = 0
 
-    for py = 52, 2, -2 do
+    -- 1. Scan semua baris di world yang memiliki pohon matang, urutkan dari PALING ATAS (ty = 1..53)
+    local treeRows = {}
+    for testY = 1, 53 do
+        local hasTree = false
+        for testX = 2, 97 do
+            if isReadyTree(testX, testY, seedID, blockID) then
+                hasTree = true
+                break
+            end
+        end
+        if hasTree then
+            table.insert(treeRows, testY)
+        end
+    end
+
+    -- 2. Mulai panen dari baris PALING ATAS, dari posisi PALING KIRI
+    local rowCount = 0
+    for _, ty in ipairs(treeRows) do
         if not HV.STATE.running then return false end
         rowCount = rowCount + 1
-        local l2r = (rowCount % 2 == 1)
+        local l2r = (rowCount % 2 == 1) -- Baris pertama (paling atas) selalu l2r = true (KIRI ke KANAN)
         local startX = l2r and 2 or 97
         local endX   = l2r and 97 or 2
         local stepX  = l2r and 1 or -1
 
-        local ty = py - 1
-        local hasTreeInRow = false
-        for x = 2, 97 do
-            if isReadyTree(x, ty, seedID) then hasTreeInRow = true; break end
-        end
+        local py = ty + 1 -- Lantai tempat pohon berpijak
 
-        if hasTreeInRow then
-            if not ensureHVOnline(row, true) then return false end
-            if isZigzag then
-                local x = startX
-                while (l2r and x <= endX) or ((not l2r) and x >= endX) do
-                    if not HV.STATE.running then return false end
-                    if not ensureHVOnline(row, true) then return false end
+        if not ensureHVOnline(row, true) then return false end
+        if isZigzag then
+            local x = startX
+            while (l2r and x <= endX) or ((not l2r) and x >= endX) do
+                if not HV.STATE.running then return false end
+                if not ensureHVOnline(row, true) then return false end
 
-                    local t1 = isReadyTree(x, ty, seedID)
-                    local t2 = isReadyTree(x + stepX, ty, seedID)
-                    local t3 = isReadyTree(x + (stepX * 2), ty, seedID)
+                local t1 = isReadyTree(x, ty, seedID, blockID)
+                local t2 = isReadyTree(x + stepX, ty, seedID, blockID)
+                local t3 = isReadyTree(x + (stepX * 2), ty, seedID, blockID)
 
-                    if t1 or t2 or t3 then
-                        if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
-                        moveSafeTo(x, py)
-                        collectNearbyAllowed(allowedSet, 4)
+                if t1 or t2 or t3 then
+                    if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+                    local standY = py
+                    local tFloor = getTileSafe(x, py)
+                    if tFloor and tFloor.collidable then standY = ty end
+                    moveSafeTo(x, standY)
+                    collectNearbyAllowed(allowedSet, 4)
 
-                        if t1 then punchTile(x, ty); safeSleep(hDelay); HV.STATE.total_harvested = HV.STATE.total_harvested + 1 end
-                        if t2 then punchTile(x + stepX, ty); safeSleep(hDelay); HV.STATE.total_harvested = HV.STATE.total_harvested + 1 end
-                        if t3 then punchTile(x + (stepX * 2), ty); safeSleep(hDelay); HV.STATE.total_harvested = HV.STATE.total_harvested + 1 end
-                        collectNearbyAllowed(allowedSet, 4)
-                        x = x + (stepX * 3)
-                    else
-                        x = x + stepX
-                    end
+                    -- Validasi pukulan pohon matang
+                    if t1 then harvestTreeTile(x, ty, seedID, blockID, hDelay) end
+                    if t2 then harvestTreeTile(x + stepX, ty, seedID, blockID, hDelay) end
+                    if t3 then harvestTreeTile(x + (stepX * 2), ty, seedID, blockID, hDelay) end
+
+                    collectNearbyAllowed(allowedSet, 4)
+                    x = x + (stepX * 3)
+                else
+                    x = x + stepX
                 end
-            else
-                for x = startX, endX, stepX do
-                    if not HV.STATE.running then return false end
-                    if not ensureHVOnline(row, true) then return false end
-                    if isReadyTree(x, ty, seedID) then
-                        if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
-                        moveSafeTo(x, py)
-                        collectNearbyAllowed(allowedSet, 4)
-                        punchTile(x, ty)
-                        safeSleep(hDelay)
-                        HV.STATE.total_harvested = HV.STATE.total_harvested + 1
-                        collectNearbyAllowed(allowedSet, 4)
-                    end
+            end
+        else
+            for x = startX, endX, stepX do
+                if not HV.STATE.running then return false end
+                if not ensureHVOnline(row, true) then return false end
+                if isReadyTree(x, ty, seedID, blockID) then
+                    if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+                    local standY = py
+                    local tFloor = getTileSafe(x, py)
+                    if tFloor and tFloor.collidable then standY = ty end
+                    moveSafeTo(x, standY)
+                    collectNearbyAllowed(allowedSet, 4)
+
+                    -- Validasi pukulan pohon matang
+                    harvestTreeTile(x, ty, seedID, blockID, hDelay)
+
+                    collectNearbyAllowed(allowedSet, 4)
                 end
             end
         end
@@ -1257,19 +1870,20 @@ local function uiSection(title, skipTopSep)
 end
 
 local function uiSectionWithKetik(title, btnId, onKetikClick, skipTopSep)
-    local k = uiKit()
-    if k and k.sectionWithKetik and k.openInputDialog then
-        k.sectionWithKetik(title, btnId, onKetikClick, skipTopSep)
-        return
-    end
     uiSection(title, skipTopSep)
 end
 
 local function uiOpenDialog(id, title, fields, submitLbl, onSubmit)
+    activeNativeDialogs[id] = onSubmit
+    _G.__BOREN_ACTIVE_NATIVE_DIALOGS = _G.__BOREN_ACTIVE_NATIVE_DIALOGS or {}
+    _G.__BOREN_ACTIVE_NATIVE_DIALOGS[id] = onSubmit
+
     local k = uiKit()
     if k and k.openInputDialog then
         k.openInputDialog(id, title, fields, submitLbl, onSubmit)
+        return
     end
+    openNativeInputDialog(id, title, fields, submitLbl, onSubmit)
 end
 
 local function uiEnableBtn(isOn, id)
@@ -1311,16 +1925,61 @@ local function uiActionBar(id, w, buttons)
     return hit
 end
 
-local function safeInput(id, val, maxL)
-    local k = uiKit()
-    if k and k.safeInputText then return k.safeInputText(id, val, maxL) end
-    local s = tostring(val or "")
-    local ok, r1, r2 = pcall(ImGui.InputText, id, s, maxL or 256)
-    if not ok then return false, s end
-    if type(r1) == "boolean" and type(r2) == "string" then return (r1 or r2 ~= s), r2
-    elseif type(r1) == "string" then return (r2 == true or r1 ~= s), r1
-    elseif type(r2) == "string" and r2 ~= s then return true, r2 end
-    return false, s
+local formRevision = 1
+
+local function cleanInputStr(v)
+    return tostring(v or ""):gsub("%z.*", "")
+end
+
+local function cleanDialogField(v)
+    local s = tostring(v or ""):gsub("%z.*", "")
+    s = s:gsub("[\r\n|]+$", ""):gsub("^[\r\n|]+", "")
+    return s:gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local lastDialogOpenAt = 0
+local function safeInput(id, val, maxL, onKetikFn)
+    local s = cleanInputStr(val)
+    local uniqueId = tostring(id) .. "_" .. tostring(formRevision)
+    local ok, r1, r2 = pcall(ImGui.InputText, uniqueId, s, maxL or 256)
+    local changed = false
+    local newVal = s
+
+    if ok then
+        if type(r1) == "boolean" and type(r2) == "string" then
+            if r1 == true then
+                changed = true
+                newVal = cleanInputStr(r2)
+            end
+        elseif type(r1) == "string" and type(r2) == "boolean" then
+            if r2 == true then
+                changed = true
+                newVal = cleanInputStr(r1)
+            end
+        end
+    end
+
+    -- Otomatis panggil Native Keyboard Dialog saat kolom form diketuk / disentuh
+    if onKetikFn and ImGui then
+        local clicked = false
+        if ImGui.IsItemClicked then
+            local okC, clk = pcall(ImGui.IsItemClicked, 0)
+            if okC and clk then clicked = true end
+        end
+        if not clicked and ImGui.IsItemActivated then
+            local okA, act = pcall(ImGui.IsItemActivated)
+            if okA and act then clicked = true end
+        end
+        if clicked then
+            local now = os.clock and os.clock() or os.time()
+            if (now - lastDialogOpenAt) >= 0.8 then
+                lastDialogOpenAt = now
+                pcall(onKetikFn)
+            end
+        end
+    end
+
+    return changed, newVal
 end
 
 local function readClipLines()
@@ -1376,7 +2035,17 @@ local function renderFarmsSub()
         st.rows = {}; st.selected_idx = 0; HV.saveData(); uiNotice = "Daftar farm dikosongkan."
     end
 
-    uiGap(4)
+    uiGap(3)
+    ImGui.Text("Take Block :"); ImGui.SameLine()
+    if uiToggleBtn(c.take_block ~= false, "hv_tb_main") then
+        c.take_block = not (c.take_block ~= false); HV.saveData()
+    end
+    ImGui.SameLine(); ImGui.Text("   Take Seed :"); ImGui.SameLine()
+    if uiToggleBtn(c.take_seed ~= false, "hv_ts_main") then
+        c.take_seed = not (c.take_seed ~= false); HV.saveData()
+    end
+
+    uiGap(3)
     ImGui.Text(string.format("Status: %s   |   Farm: %d   |   Tree: %d   |   Drop: %d",
         tostring(st.status_text), #st.rows, st.total_harvested, st.total_dropped))
     uiNote(uiNotice)
@@ -1413,27 +2082,44 @@ local function renderFarmsSub()
         ImGui.EndTable()
     end
 
-    uiSectionWithKetik("Tambah World Farm Baru", "hv_ktk_w", function()
-        local wPre, dPre = tostring(addFarmWorldBuf or ""):gsub("|", ":"):match("^([^:]+):(.*)$")
-        if not wPre then wPre = tostring(addFarmWorldBuf or ""); dPre = "" end
-        uiOpenDialog("boren_in_hv_w", "Tambah World Harvest", {
-            { id = "f_world", label = "Nama World", default = wPre, maxLen = 32 },
-            { id = "f_door",  label = "Door ID (opsional)", default = dPre, maxLen = 32 },
-            { id = "f_item",  label = "Block / Seed ID", default = addFarmItemBuf, maxLen = 12 },
-        }, "Tambah & Simpan", function(vals)
-            local wn = trimStr(vals.f_world or ""):upper()
-            local dn = trimStr(vals.f_door or ""):upper()
-            local iid = math.floor(tonumber(vals.f_item) or tonumber(c.default_item_id) or 4584)
-            if iid <= 0 then iid = 4584 end
-            c.default_item_id = iid
-            addFarmItemBuf = tostring(iid)
-            if wn ~= "" then
-                local p = { name = wn, door = dn, item_id = iid, status = "Ready" }
-                table.insert(st.rows, p); addFarmWorldBuf = ""; HV.saveData()
-                uiNotice = "Tersimpan: " .. wn .. " (ID " .. tostring(iid) .. ")"
+    local function ketikFarmForm()
+        local wPre = cleanDialogField(addFarmWorldBuf)
+        local iPre = cleanDialogField(addFarmItemBuf ~= "" and addFarmItemBuf or (c.default_item_id and tostring(c.default_item_id) or "4584"))
+        uiOpenDialog("boren_hv_fform", "Input Form Farm", {
+            { id = "f_world", label = "World Farm (Nama atau Nama:DoorID)", default = wPre, maxLen = 64 },
+            { id = "f_item",  label = "Item ID (Block atau Seed)", default = iPre, maxLen = 16 },
+        }, "Masukkan ke Form", function(vals)
+            local rawW = vals.f_world or vals["f_world"] or ""
+            if rawW == "" then
+                for k, v in pairs(vals) do
+                    if tostring(k):lower():find("world") then rawW = v; break end
+                end
             end
+            local rawI = vals.f_item or vals["f_item"] or ""
+            if rawI == "" then
+                for k, v in pairs(vals) do
+                    if tostring(k):lower():find("item") then rawI = v; break end
+                end
+            end
+            local wn = cleanDialogField(rawW):upper()
+            local iidStr = cleanDialogField(rawI):gsub("[^0-9]", "")
+            if wn ~= "" then
+                addFarmWorldBuf = wn
+            end
+            if iidStr ~= "" then
+                addFarmItemBuf = iidStr
+                local n = tonumber(iidStr)
+                if n and n > 0 then
+                    c.default_item_id = math.floor(n)
+                    HV.saveData()
+                end
+            end
+            formRevision = formRevision + 1
+            uiNotice = "Form World Farm terisi: " .. tostring(addFarmWorldBuf)
         end)
-    end)
+    end
+
+    uiSectionWithKetik("Tambah World Farm Baru", "hv_ktk_w", ketikFarmForm)
 
     if ImGui.BeginTable("BorenHarvestAddW", 2) then
         ImGui.TableSetupColumn("World:DoorID")
@@ -1442,13 +2128,13 @@ local function renderFarmsSub()
         ImGui.TableNextRow()
         ImGui.TableSetColumnIndex(0)
         ImGui.PushItemWidth(math.max(120, math.floor(w * 0.56)))
-        local chW, nvW = safeInput("##hv_add_w", addFarmWorldBuf, 256)
+        local chW, nvW = safeInput("##hv_add_w", addFarmWorldBuf, 256, ketikFarmForm)
         ImGui.PopItemWidth()
         if chW then addFarmWorldBuf = nvW end
 
         ImGui.TableSetColumnIndex(1)
         ImGui.PushItemWidth(math.max(80, math.floor(w * 0.34)))
-        local chI, nvI = safeInput("##hv_add_item", addFarmItemBuf, 64)
+        local chI, nvI = safeInput("##hv_add_item", addFarmItemBuf, 64, ketikFarmForm)
         ImGui.PopItemWidth()
         if chI then
             addFarmItemBuf = nvI:gsub("[^0-9]", "")
@@ -1469,11 +2155,13 @@ local function renderFarmsSub()
 
     if act == 1 then
         local rawW = trimStr(addFarmWorldBuf)
-        local p = nil
-        if rawW ~= "" then
+        if rawW == "" then
+            uiNotice = "Isi World:DoorID dulu!"
+        else
             local norm = rawW:gsub("|", ":")
             local colons = 0
             for _ in norm:gmatch(":") do colons = colons + 1 end
+            local p = nil
             if colons >= 2 then
                 p = parseFarmRow(norm)
             else
@@ -1484,21 +2172,19 @@ local function renderFarmsSub()
                 if iid <= 0 then iid = 4584 end
                 if wName ~= "" then p = { name = wName, door = dId, item_id = iid, status = "Ready" } end
             end
+            if p then
+                table.insert(st.rows, p); addFarmWorldBuf = ""; HV.saveData()
+                uiNotice = "Tersimpan: " .. p.name .. " (ID " .. tostring(p.item_id) .. ")"
+            end
         end
-        if p then
-            table.insert(st.rows, p); addFarmWorldBuf = ""; HV.saveData()
-            uiNotice = "Tersimpan: " .. p.name .. " (ID " .. tostring(p.item_id) .. ")"
-        else uiNotice = "Isi World:DoorID dulu!" end
 
     elseif act == 2 then
-        runAsync(function()
-            local curW = getCurrentWorldSafe()
-            if curW ~= "" and curW ~= "EXIT" then
-                local iid = math.floor(tonumber(addFarmItemBuf) or tonumber(c.default_item_id) or 4584)
-                table.insert(st.rows, { name = curW, door = "", item_id = iid, status = "Ready" })
-                HV.saveData(); uiNotice = "World aktif ditambah: " .. curW
-            else uiNotice = "Masuk ke world dulu!" end
-        end)
+        local curW = getCurrentWorldSafe()
+        if curW ~= "" and curW ~= "EXIT" then
+            addFarmWorldBuf = curW .. ":"
+            formRevision = formRevision + 1
+            uiNotice = "Terisi " .. curW .. ": (masukkan Door ID jika ada, lalu klik + Tambah)"
+        else uiNotice = "Masuk ke world dulu!" end
 
     elseif act == 3 then
         local added = 0
@@ -1572,30 +2258,23 @@ local function renderSaveSub()
         ImGui.EndTable()
     end
 
-    uiSectionWithKetik("Tambah Save World Baru", "hv_ktk_sw", function()
-        local wPre, dPre = tostring(addSaveWorldBuf or ""):gsub("|", ":"):match("^([^:]+):(.*)$")
-        if not wPre then wPre = tostring(addSaveWorldBuf or ""); dPre = "" end
-        uiOpenDialog("boren_in_hv_sw", "Tambah Save World", {
-            { id = "f_world", label = "World Save", default = wPre, maxLen = 32 },
-            { id = "f_door",  label = "Door ID (opsional)", default = dPre, maxLen = 32 },
-            { id = "f_type",  label = "Tipe: ALL / BLOCK / SEED", default = addSaveTypeBuf, maxLen = 8 },
-            { id = "f_lim",   label = "Limit Item (0 = Unlimited)", default = addSaveLimitBuf, maxLen = 16 },
-        }, "Tambah & Simpan", function(vals)
-            local wn = trimStr(vals.f_world or ""):upper()
-            local dn = trimStr(vals.f_door or ""):upper()
-            local stype = trimStr(vals.f_type or "ALL"):upper()
-            if stype ~= "BLOCK" and stype ~= "SEED" then stype = "ALL" end
-            local lim = math.floor(tonumber(vals.f_lim) or tonumber(c.default_save_limit) or 20000)
-            if lim < 0 then lim = 0 end
-            addSaveTypeBuf = stype
-            addSaveLimitBuf = tostring(lim)
-            if wn ~= "" then
-                table.insert(st.save_rows, { name = wn, door = dn, save_type = stype, limit = lim, count = 0, status = "Ready" })
-                addSaveWorldBuf = ""; HV.saveData()
-                uiNotice = "Tersimpan Save: " .. wn .. " (" .. stype .. ")"
-            end
+    local function ketikSaveForm()
+        local wPre = cleanDialogField(addSaveWorldBuf)
+        local lPre = cleanDialogField(addSaveLimitBuf ~= "" and addSaveLimitBuf or "0")
+        uiOpenDialog("boren_hv_sform", "Input Form Save World", {
+            { id = "f_world", label = "Save World (Nama atau Nama:DoorID)", default = wPre, maxLen = 64 },
+            { id = "f_lim",   label = "Limit per World (0 = Unlimited)", default = lPre, maxLen = 16 },
+        }, "Masukkan ke Form", function(vals)
+            local wn = cleanDialogField(vals.f_world or vals["f_world"]):upper()
+            local limStr = cleanDialogField(vals.f_lim or vals["f_lim"]):gsub("[^0-9]", "")
+            if wn ~= "" then addSaveWorldBuf = wn end
+            if limStr ~= "" then addSaveLimitBuf = limStr else addSaveLimitBuf = "0" end
+            formRevision = formRevision + 1
+            uiNotice = "Form Save World terisi: " .. tostring(addSaveWorldBuf)
         end)
-    end)
+    end
+
+    uiSectionWithKetik("Tambah Save World Baru", "hv_ktk_sw", ketikSaveForm)
 
     if ImGui.BeginTable("BorenHarvestAddSwTbl", 2) then
         ImGui.TableSetupColumn("World:DoorID")
@@ -1604,7 +2283,7 @@ local function renderSaveSub()
         ImGui.TableNextRow()
         ImGui.TableSetColumnIndex(0)
         ImGui.PushItemWidth(math.max(120, math.floor(w * 0.48)))
-        local chW, nvW = safeInput("##hv_add_sw", addSaveWorldBuf, 256)
+        local chW, nvW = safeInput("##hv_add_sw", addSaveWorldBuf, 256, ketikSaveForm)
         ImGui.PopItemWidth()
         if chW then addSaveWorldBuf = nvW end
 
@@ -1618,20 +2297,17 @@ local function renderSaveSub()
     end
 
     uiGap(2)
-    ImGui.Text("Limit per World:")
+    ImGui.Text("Limit per World (0 = Unlimited):")
     ImGui.SameLine()
-    ImGui.PushItemWidth(math.max(70, math.floor(w * 0.22)))
-    local chLim, nvLim = safeInput("##hv_sw_lim_in", addSaveLimitBuf, 16)
+    ImGui.PushItemWidth(math.max(80, math.floor(w * 0.28)))
+    local chLim, nvLim = safeInput("##hv_sw_lim_in", addSaveLimitBuf, 16, ketikSaveForm)
     ImGui.PopItemWidth()
     if chLim then addSaveLimitBuf = nvLim:gsub("[^0-9]", "") end
     ImGui.SameLine()
-    if autoBtn("10k##sw_10") then addSaveLimitBuf = "10000" end
-    ImGui.SameLine()
-    if autoBtn("20k##sw_20") then addSaveLimitBuf = "20000" end
-    ImGui.SameLine()
-    if autoBtn("50k##sw_50") then addSaveLimitBuf = "50000" end
-    ImGui.SameLine()
-    if autoBtn("Unli##sw_unl") then addSaveLimitBuf = "0" end
+    local isUnliSw = (addSaveLimitBuf == "0" or addSaveLimitBuf == "")
+    if autoBtn(isUnliSw and "[ Unlimited ]##sw_unl" or "Unlimited##sw_unl") then
+        addSaveLimitBuf = "0"
+    end
 
     uiGap(4)
     local act = uiActionBar("BorenHarvestSaveActs", w, {
@@ -1644,8 +2320,9 @@ local function renderSaveSub()
 
     if act == 1 then
         local rawW = trimStr(addSaveWorldBuf)
-        local p = nil
-        if rawW ~= "" then
+        if rawW == "" then
+            uiNotice = "Isi World Save dulu!"
+        else
             local norm = rawW:gsub("|", ":")
             local colons = 0
             for _ in norm:gmatch(":") do colons = colons + 1 end
@@ -1666,14 +2343,11 @@ local function renderSaveSub()
         else uiNotice = "Isi World:DoorID dulu!" end
 
     elseif act == 2 then
-        runAsync(function()
-            local curW = getCurrentWorldSafe()
-            if curW ~= "" and curW ~= "EXIT" then
-                local lim = math.floor(tonumber(addSaveLimitBuf) or 20000)
-                table.insert(st.save_rows, { name = curW, door = "", save_type = addSaveTypeBuf, limit = lim, count = 0, status = "Ready" })
-                HV.saveData(); uiNotice = "World aktif ditambah: " .. curW
-            else uiNotice = "Masuk ke world dulu!" end
-        end)
+        local curW = getCurrentWorldSafe()
+        if curW ~= "" and curW ~= "EXIT" then
+            addSaveWorldBuf = curW .. ":"
+            uiNotice = "Terisi " .. curW .. ": (masukkan Door ID jika ada, lalu klik + Tambah)"
+        else uiNotice = "Masuk ke world dulu!" end
 
     elseif act == 3 then
         local added = 0
@@ -1751,26 +2425,23 @@ local function renderEventSub()
         ImGui.EndTable()
     end
 
-    uiSectionWithKetik("Tambah Event World Baru", "hv_ktk_ew", function()
-        local wPre, dPre = tostring(addEventWorldBuf or ""):gsub("|", ":"):match("^([^:]+):(.*)$")
-        if not wPre then wPre = tostring(addEventWorldBuf or ""); dPre = "" end
-        uiOpenDialog("boren_in_hv_ew", "Tambah World Event", {
-            { id = "f_world", label = "World Event", default = wPre, maxLen = 32 },
-            { id = "f_door",  label = "Door ID (opsional)", default = dPre, maxLen = 32 },
-            { id = "f_lim",   label = "Limit Total Item (0 = Unlimited)", default = addEventLimitBuf, maxLen = 16 },
-        }, "Tambah & Simpan", function(vals)
-            local wn = trimStr(vals.f_world or ""):upper()
-            local dn = trimStr(vals.f_door or ""):upper()
-            local lim = math.floor(tonumber(vals.f_lim) or tonumber(c.default_ev_limit) or 10000)
-            if lim < 0 then lim = 0 end
-            addEventLimitBuf = tostring(lim)
-            if wn ~= "" then
-                table.insert(st.event_rows, { name = wn, door = dn, limit = lim, count = 0, status = "Ready" })
-                addEventWorldBuf = ""; HV.saveData()
-                uiNotice = "Tersimpan Event: " .. wn
-            end
+    local function ketikEventForm()
+        local wPre = cleanDialogField(addEventWorldBuf)
+        local lPre = cleanDialogField(addEventLimitBuf ~= "" and addEventLimitBuf or "0")
+        uiOpenDialog("boren_hv_eform", "Input Form Event World", {
+            { id = "f_world", label = "World Event (Nama atau Nama:DoorID)", default = wPre, maxLen = 64 },
+            { id = "f_lim",   label = "Limit Total Item (0 = Unlimited)", default = lPre, maxLen = 16 },
+        }, "Masukkan ke Form", function(vals)
+            local wn = cleanDialogField(vals.f_world or vals["f_world"]):upper()
+            local limStr = cleanDialogField(vals.f_lim or vals["f_lim"]):gsub("[^0-9]", "")
+            if wn ~= "" then addEventWorldBuf = wn end
+            if limStr ~= "" then addEventLimitBuf = limStr else addEventLimitBuf = "0" end
+            formRevision = formRevision + 1
+            uiNotice = "Form Event World terisi: " .. tostring(addEventWorldBuf)
         end)
-    end)
+    end
+
+    uiSectionWithKetik("Tambah Event World Baru", "hv_ktk_ew", ketikEventForm)
 
     if ImGui.BeginTable("BorenHarvestAddEwTbl", 2) then
         ImGui.TableSetupColumn("World:DoorID")
@@ -1779,28 +2450,25 @@ local function renderEventSub()
         ImGui.TableNextRow()
         ImGui.TableSetColumnIndex(0)
         ImGui.PushItemWidth(math.max(120, math.floor(w * 0.52)))
-        local chW, nvW = safeInput("##hv_add_ew", addEventWorldBuf, 256)
+        local chW, nvW = safeInput("##hv_add_ew", addEventWorldBuf, 256, ketikEventForm)
         ImGui.PopItemWidth()
         if chW then addEventWorldBuf = nvW end
 
         ImGui.TableSetColumnIndex(1)
         ImGui.PushItemWidth(math.max(70, math.floor(w * 0.24)))
-        local chLim, nvLim = safeInput("##hv_ew_lim_in", addEventLimitBuf, 16)
+        local chLim, nvLim = safeInput("##hv_ew_lim_in", addEventLimitBuf, 16, ketikEventForm)
         ImGui.PopItemWidth()
         if chLim then addEventLimitBuf = nvLim:gsub("[^0-9]", "") end
         ImGui.EndTable()
     end
 
     uiGap(2)
-    ImGui.Text("Preset Limit Event:")
+    ImGui.Text("Limit per World (0 = Unlimited):")
     ImGui.SameLine()
-    if autoBtn("5k##ew_5") then addEventLimitBuf = "5000" end
-    ImGui.SameLine()
-    if autoBtn("10k##ew_10") then addEventLimitBuf = "10000" end
-    ImGui.SameLine()
-    if autoBtn("20k##ew_20") then addEventLimitBuf = "20000" end
-    ImGui.SameLine()
-    if autoBtn("Unli##ew_unl") then addEventLimitBuf = "0" end
+    local isUnliEv = (addEventLimitBuf == "0" or addEventLimitBuf == "")
+    if autoBtn(isUnliEv and "[ Unlimited ]##ew_unl" or "Unlimited##ew_unl") then
+        addEventLimitBuf = "0"
+    end
 
     uiGap(4)
     local act = uiActionBar("BorenHarvestEventActs", w, {
@@ -1813,8 +2481,9 @@ local function renderEventSub()
 
     if act == 1 then
         local rawW = trimStr(addEventWorldBuf)
-        local p = nil
-        if rawW ~= "" then
+        if rawW == "" then
+            uiNotice = "Isi World Event dulu!"
+        else
             local norm = rawW:gsub("|", ":")
             local colons = 0
             for _ in norm:gmatch(":") do colons = colons + 1 end
@@ -1835,14 +2504,11 @@ local function renderEventSub()
         else uiNotice = "Isi World:DoorID dulu!" end
 
     elseif act == 2 then
-        runAsync(function()
-            local curW = getCurrentWorldSafe()
-            if curW ~= "" and curW ~= "EXIT" then
-                local lim = math.floor(tonumber(addEventLimitBuf) or 10000)
-                table.insert(st.event_rows, { name = curW, door = "", limit = lim, count = 0, status = "Ready" })
-                HV.saveData(); uiNotice = "Event world ditambah: " .. curW
-            else uiNotice = "Masuk ke world dulu!" end
-        end)
+        local curW = getCurrentWorldSafe()
+        if curW ~= "" and curW ~= "EXIT" then
+            addEventWorldBuf = curW .. ":"
+            uiNotice = "Terisi " .. curW .. ": (masukkan Door ID jika ada, lalu klik + Tambah)"
+        else uiNotice = "Masuk ke world dulu!" end
 
     elseif act == 3 then
         local added = 0
@@ -1870,9 +2536,24 @@ local function renderEventSub()
     end
 
     uiGap(4)
+    local function ketikEventIdsDialog()
+        local cur = cleanDialogField(c.event_ids_raw or "")
+        uiOpenDialog("boren_hv_eids", "Input ID Item Event", {
+            { id = "f_eids", label = "Daftar ID Item Event (pisah koma)", default = cur, maxLen = 256 },
+        }, "Simpan ID Event", function(vals)
+            local raw = cleanDialogField(vals.f_eids or vals["f_eids"])
+            if raw ~= "" then
+                c.event_ids_raw = raw
+                formRevision = formRevision + 1
+                HV.saveData()
+                uiNotice = "ID Event diperbarui: " .. c.event_ids_raw
+            end
+        end)
+    end
+
     uiSection("Daftar ID Item Event (Disimpan ke World Event)")
     ImGui.PushItemWidth(math.max(160, math.floor(w * 0.96)))
-    local chEI, vEI = safeInput("##hv_ei", c.event_ids_raw, 512)
+    local chEI, vEI = safeInput("##hv_ei", c.event_ids_raw, 512, ketikEventIdsDialog)
     ImGui.PopItemWidth()
     if chEI then c.event_ids_raw = vEI; HV.saveData() end
 
@@ -1906,31 +2587,34 @@ local function renderGearSub()
     uiSection("Gudang Alat & Fuel (Gear World)", true)
     uiNote(uiNotice)
 
-    uiSectionWithKetik("World Penyimpanan Alat & Fuel (WORLD:DOOR)", "hv_ktk_gw", function()
-        uiOpenDialog("boren_in_hv_gw", "Setting Gear World", {
-            { id = "gw", label = "Gear World (WORLD:DOOR)", default = c.gear_world, maxLen = 64 },
-            { id = "eq", label = "List ID Equip Alat (pisah koma)", default = c.gear_equip_ids, maxLen = 64 },
-            { id = "fa", label = "Target Ambil Fuel Pack", default = tostring(c.fuel_target_amt), maxLen = 8 },
-        }, "Simpan", function(v)
-            c.gear_world = trimStr(v.gw or "")
-            c.gear_equip_ids = trimStr(v.eq or "6840, 1966")
-            local n = tonumber(v.fa); if n and n >= 1 then c.fuel_target_amt = math.min(200, math.floor(n)) end
-            HV.saveData(); uiNotice = "Gear World berhasil disimpan."
+    local function ketikGearWorldDialog()
+        local cur = cleanDialogField(c.gear_world or "")
+        uiOpenDialog("boren_hv_gw", "Input World Ambil Gear", {
+            { id = "gw", label = "Gear World (WORLD:DOOR)", default = cur, maxLen = 64 },
+        }, "Simpan Gear World", function(v)
+            local raw = cleanDialogField(v.gw or v["gw"]):upper()
+            if raw ~= "" then
+                c.gear_world = raw
+                formRevision = formRevision + 1
+                HV.saveData()
+                uiNotice = "Gear World berhasil disimpan: " .. c.gear_world
+            end
         end)
-    end)
+    end
+
+    uiSectionWithKetik("World Penyimpanan Alat & Fuel (WORLD:DOOR)", "hv_ktk_gw", ketikGearWorldDialog)
 
     ImGui.PushItemWidth(math.max(160, math.floor(w * 0.72)))
-    local chGW, vGW = safeInput("##hv_gw", c.gear_world, 128)
+    local chGW, vGW = safeInput("##hv_gw", c.gear_world, 128, ketikGearWorldDialog)
     ImGui.PopItemWidth()
     if chGW then c.gear_world = vGW; HV.saveData() end
     ImGui.SameLine()
     if autoBtn(" World Ini ##hv_gwc") then
-        runAsync(function()
-            local cw = getCurrentWorldSafe()
-            if cw ~= "" and cw ~= "EXIT" then
-                c.gear_world = cw .. ":"; HV.saveData(); uiNotice = "Gear World diset ke: " .. cw
-            else uiNotice = "Masuk ke world dulu!" end
-        end)
+        local cw = getCurrentWorldSafe()
+        if cw ~= "" and cw ~= "EXIT" then
+            c.gear_world = cw .. ":"
+            HV.saveData(); uiNotice = "Terisi " .. cw .. ": (masukkan Door ID jika ada)"
+        else uiNotice = "Masuk ke world dulu!" end
     end
 
     uiGap(4)
@@ -1957,26 +2641,50 @@ local function renderGearSub()
     end
 
     uiGap(4)
-    uiSection("Daftar ID Alat untuk Di-equip (Hand / Back)")
-    ImGui.Text("List ID Item Equip (DCS, Harvester, dll. pisah koma):")
-    ImGui.PushItemWidth(math.max(160, math.floor(w * 0.96)))
-    local chEq, vEq = safeInput("##hv_eq_ids", c.gear_equip_ids, 256)
-    ImGui.PopItemWidth()
-    if chEq then c.gear_equip_ids = vEq; HV.saveData() end
+    uiSection("Equip DCS & Harvester (Hand / Back)")
+    ImGui.Text("Gunakan DCS & Harvester :"); ImGui.SameLine()
+    if uiToggleBtn(c.use_dcs_harvester, "hv_use_dcs") then
+        c.use_dcs_harvester = not c.use_dcs_harvester
+        HV.saveData()
+    end
 
-    uiGap(2)
-    ImGui.Text("Preset Cepat :")
-    ImGui.SameLine()
-    if autoBtn(" DCS + Sorrows (6840, 1966) ##eq_p1") then
-        c.gear_equip_ids = "6840, 1966"; HV.saveData(); uiNotice = "Preset DCS + Sorrows diterapkan."
-    end
-    ImGui.SameLine()
-    if autoBtn(" DCS + Normal (6840, 1830) ##eq_p2") then
-        c.gear_equip_ids = "6840, 1830"; HV.saveData(); uiNotice = "Preset DCS + Normal diterapkan."
-    end
-    ImGui.SameLine()
-    if autoBtn(" Sorrows Saja (1966) ##eq_p3") then
-        c.gear_equip_ids = "1966"; HV.saveData(); uiNotice = "Preset Sorrows saja diterapkan."
+    if c.use_dcs_harvester then
+        uiGap(2)
+        ImGui.Text("List ID Item Equip (DCS, Harvester, dll. pisah koma):")
+        local function ketikGearEquipDialog()
+            local cur = cleanDialogField(c.gear_equip_ids or "")
+            uiOpenDialog("boren_hv_geq", "Input List ID Equip", {
+                { id = "eq", label = "List ID Equip Alat (pisah koma)", default = cur, maxLen = 128 },
+            }, "Simpan ID Equip", function(v)
+                local raw = cleanDialogField(v.eq or v["eq"])
+                if raw ~= "" then
+                    c.gear_equip_ids = raw
+                    formRevision = formRevision + 1
+                    HV.saveData()
+                    uiNotice = "Equip IDs berhasil disimpan: " .. c.gear_equip_ids
+                end
+            end)
+        end
+
+        ImGui.PushItemWidth(math.max(160, math.floor(w * 0.96)))
+        local chEq, vEq = safeInput("##hv_eq_ids", c.gear_equip_ids, 256, ketikGearEquipDialog)
+        ImGui.PopItemWidth()
+        if chEq then c.gear_equip_ids = vEq; HV.saveData() end
+
+        uiGap(2)
+        ImGui.Text("Preset Cepat :")
+        ImGui.SameLine()
+        if autoBtn(" DCS + Sorrows (6840, 1966) ##eq_p1") then
+            c.gear_equip_ids = "6840, 1966"; HV.saveData(); uiNotice = "Preset DCS + Sorrows diterapkan."
+        end
+        ImGui.SameLine()
+        if autoBtn(" DCS + Normal (6840, 1830) ##eq_p2") then
+            c.gear_equip_ids = "6840, 1830"; HV.saveData(); uiNotice = "Preset DCS + Normal diterapkan."
+        end
+        ImGui.SameLine()
+        if autoBtn(" Sorrows Saja (1966) ##eq_p3") then
+            c.gear_equip_ids = "1966"; HV.saveData(); uiNotice = "Preset Sorrows saja diterapkan."
+        end
     end
 end
 
@@ -1998,6 +2706,14 @@ local function renderSettingsSub()
     uiGap(2)
     ImGui.Text("Take Floating (Sapu Sisa)  :"); ImGui.SameLine()
     if uiToggleBtn(c.take_floating, "hv_tf") then c.take_floating = not c.take_floating; HV.saveData() end
+
+    uiGap(2)
+    ImGui.Text("Take Block Sesuai ID       :"); ImGui.SameLine()
+    if uiToggleBtn(c.take_block ~= false, "hv_tb") then c.take_block = not (c.take_block ~= false); HV.saveData() end
+
+    uiGap(2)
+    ImGui.Text("Take Seed Sesuai ID        :"); ImGui.SameLine()
+    if uiToggleBtn(c.take_seed ~= false, "hv_ts") then c.take_seed = not (c.take_seed ~= false); HV.saveData() end
 
     uiGap(2)
     ImGui.Text("Mode Traversal             :"); ImGui.SameLine()
@@ -2048,6 +2764,10 @@ end
 
 function HV.render(hub)
     HUB_REF = hub or HUB_REF
+    if not HV.STATE.loaded then
+        HV.STATE.loaded = true
+        pcall(HV.loadData)
+    end
     local w = availX()
     local tabs = {
         { "farms", "Farm List" },

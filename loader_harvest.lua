@@ -1,13 +1,14 @@
 -- ============================================================================
--- LOADER BOREN STORE - AUTO HARVEST PRO (CONSOLE IMGUI)
+-- LOADER BOREN STORE - BOREN STORE - AUTO HARVEST PRO (CONSOLE IMGUI)
 -- File: loader_harvest.lua
 -- ============================================================================
--- Memuat antarmuka Console ImGui khusus Auto Harvest Pro.
+-- Memuat antarmuka Console ImGui khusus Harvest.
 -- 100% Berbasis antarmuka Console ImGui Modern (Bukan Menu Native Lama).
 -- Dilengkapi auto-fetch dari GitHub, cache-busting, dan fallback file lokal.
+-- Repo: https://github.com/rendhi69/sc_harvest_growlauncher.git
 -- ============================================================================
 
-local BASE_URL = "https://raw.githubusercontent.com/rendhi69/sc_auto_plant_growlauncher/main/"
+local BASE_URL = "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/main/"
 local BOOT_PATH = "imgui_hub/boot.lua"
 local TARGET_FEATURE = "harvest"
 
@@ -40,8 +41,8 @@ local function notifyUser(msg)
     elseif growtopia and growtopia.notify then pcall(growtopia.notify, tostring(msg)) end
 end
 
-logMsg("`9Menghubungkan ke GitHub dan memuat Console AUTO HARVEST PRO...")
-notifyUser("Memuat Console AUTO HARVEST PRO...")
+logMsg("`9Menghubungkan ke GitHub dan memuat Console HARVEST...")
+notifyUser("Memuat Console HARVEST...")
 
 local code = nil
 if fetch then
@@ -71,7 +72,7 @@ if not code or code == "" then
 end
 
 if not code or code == "" then
-    logMsg("`4Gagal memuat Console AUTO HARVEST PRO! Periksa koneksi internet / file lokal.")
+    logMsg("`4Gagal memuat Console HARVEST! Periksa koneksi internet / file lokal.")
     notifyUser("Gagal memuat Console!")
     return
 end
@@ -92,5 +93,5 @@ if not okRun or type(boot) ~= "table" or type(boot.start) ~= "function" then
 end
 
 boot.start(BASE_URL, TARGET_FEATURE)
-logMsg("`2Console AUTO HARVEST PRO Siap Digunakan!")
-notifyUser("Console AUTO HARVEST PRO Siap!")
+logMsg("`2Console HARVEST Siap Digunakan!")
+notifyUser("Console HARVEST Siap!")

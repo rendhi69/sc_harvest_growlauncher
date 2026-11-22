@@ -43,7 +43,8 @@ HV.CFG = {
     default_save_limit = 20000,         -- Default limit save world
     default_ev_limit   = 10000,         -- Default limit event world
     ignore_gems        = true,          -- Blokir collect Gems (ID 112)
-    harvest_mode       = "3zigzag",     -- "3zigzag" | "1by1"
+    ignore_take_drop   = true,          -- Ignore take block/seed saat drop di save/event world
+    harvest_mode       = "teleport",     -- "3zigzag" | "1by1"
     harvest_delay      = 180,
     step_delay         = 110,
     warp_delay         = 4500,
@@ -74,6 +75,8 @@ HV.STATE = {
     selected_save    = 0,
     event_rows       = {},              -- { { name="W", door="D", limit=10000, count=0, status="Ready" }, ... }
     selected_ev      = 0,
+    in_save_world    = false,
+    in_event_world   = false,
     anti_take        = false,
     is_dropping      = false,
     pending_drop_id  = 0,
@@ -108,6 +111,8 @@ local CACHED_PATH = nil
 -- ============================================================================
 local ITEM = {
     PUNCH     = 18,
+    MAIN_DOOR = 6,
+    DOOR      = 8,
     GEMS      = 112,
     MAGNI     = 1252,
     DCS       = 6840,
@@ -117,7 +122,7 @@ local ITEM = {
 }
 
 local LOCK_OR_DOOR_IDS = {
-    [6] = true, [12] = true, [30] = true, [60] = true, [202] = true, [204] = true,
+    [6] = true, [8] = true, [12] = true, [30] = true, [60] = true, [202] = true, [204] = true,
     [206] = true, [224] = true, [226] = true, [242] = true, [544] = true, [546] = true,
     [1796] = true, [2810] = true, [4428] = true, [4802] = true, [4994] = true, [7188] = true,
 }
@@ -390,6 +395,7 @@ function HV.saveData()
         "FLOAT="    .. (c.take_floating and "1" or "0"),
         "TAKEBLOCK=".. (c.take_block ~= false and "1" or "0"),
         "TAKESEED=" .. (c.take_seed ~= false and "1" or "0"),
+        "IGNTAKEDROP=" .. (c.ignore_take_drop ~= false and "1" or "0"),
     }
     for _, r in ipairs(HV.STATE.rows) do
         table.insert(lines, string.format("ROW=%s:%s:%d|%s", r.name, r.door or "", r.item_id or c.default_item_id, r.status or "Ready"))
@@ -420,7 +426,7 @@ function HV.loadData()
         elseif k == "SAVELIM" then c.default_save_limit = tonumber(v) or 20000
         elseif k == "EVLIM" then c.default_ev_limit = tonumber(v) or 10000
         elseif k == "IGEMS" then c.ignore_gems = (v ~= "0")
-        elseif k == "MODE" and (v == "3zigzag" or v == "1by1") then c.harvest_mode = v
+        elseif k == "MODE" and (v == "teleport" or v == "3zigzag" or v == "1by1") then c.harvest_mode = v
         elseif k == "HDELAY" then c.harvest_delay = tonumber(v) or 180
         elseif k == "SDELAY" then c.step_delay = tonumber(v) or 110
         elseif k == "MODFLY" then c.use_modfly = (v ~= "0")
@@ -437,6 +443,7 @@ function HV.loadData()
         elseif k == "FLOAT" then c.take_floating = (v ~= "0")
         elseif k == "TAKEBLOCK" then c.take_block = (v ~= "0")
         elseif k == "TAKESEED"  then c.take_seed  = (v ~= "0")
+        elseif k == "IGNTAKEDROP" then c.ignore_take_drop = (v ~= "0")
         elseif k == "MAGNI" or k == "FUEL" then if v == "1" then c.auto_magni_fuel = true end
         elseif k == "SAVEW" then legacySaveStr = trimStr(v)
         elseif k == "EVW" then legacyEventStr = trimStr(v)
@@ -791,6 +798,9 @@ end
 
 local function collectNearbyAllowed(allowedSet, radiusTiles)
     if not HV.CFG.auto_collect then return end
+    if HV.STATE.in_save_world or HV.STATE.in_event_world or HV.STATE.anti_take or HV.STATE.is_dropping then
+        return
+    end
     local px, py = getPlayerPos()
     local rad = radiusTiles or (tonumber(HV.CFG.collect_range) or 4)
     forEachWorldObject(function(oid, uid, _, ox, oy)
@@ -810,7 +820,7 @@ local function collectNearbyAllowed(allowedSet, radiusTiles)
 end
 
 -- ============================================================================
--- 4. DROP ENGINE (RAPI, SKIP LOCK/DOOR, PINDAH TILE & CEK LIMIT)
+-- 3. DIALOG & VARIANT HOOKS (AUTO CONFIRM DROP & DIALOG HANDLERS)
 -- ============================================================================
 local function parseDropDialogPacket(dlgText, fallbackID, dropAmt)
     local embedLines = {}
@@ -828,25 +838,56 @@ local function parseDropDialogPacket(dlgText, fallbackID, dropAmt)
     return table.concat(out, "\n") .. "\n"
 end
 
-local function onVariantHook(var)
-    if not HV.STATE.running or HV.STATE.pending_drop_id <= 0 then return end
-    if var and var[0] == "OnDialogRequest" and type(var[1]) == "string" then
-        local text = var[1]
-        if text:find("drop", 1, true) or text:find("Drop", 1, true) then
-            local pkt = parseDropDialogPacket(text, HV.STATE.pending_drop_id, HV.STATE.pending_drop_amt)
-            if sendPacket then
-                pcall(sendPacket, 2, pkt)
-                HV.STATE.drop_confirmed = true
+local function extractDialogPayload(var)
+    if not var then return nil end
+    local v0 = tostring(var.v0 or var.v1 or var[0] or var[1] or "")
+    local v1 = tostring(var.v1 or var.v2 or var[1] or var[2] or "")
+    if v0 == "OnDialogRequest" then
+        return (v1 ~= "" and v1) or tostring(var.v2 or var[2] or "")
+    elseif v1 == "OnDialogRequest" then
+        return tostring(var.v2 or var[2] or var[0] or "")
+    else
+        for _, k in ipairs({ 0, 1, 2, 3, "v0", "v1", "v2", "v3" }) do
+            local val = tostring(var[k] or "")
+            if val:find("end_dialog", 1, true) or val:find("add_text_input", 1, true) then
+                return val
             end
         end
     end
+    return nil
+end
+
+local function onVariantHook(var, pkt)
+    if not var then return false end
+    local ok, shouldBlock = pcall(function()
+        local raw = extractDialogPayload(var)
+        if raw and raw ~= "" and (raw:find("drop", 1, true) or raw:find("Drop", 1, true)) then
+            local itmId = tonumber(raw:match("itemID|(%d+)")) or HV.STATE.pending_drop_id or 0
+            local itmAmt = HV.STATE.pending_drop_amt or 200
+            if itmAmt <= 0 then itmAmt = 200 end
+            local dropPkt = parseDropDialogPacket(raw, itmId, itmAmt)
+            if sendPacket then
+                pcall(sendPacket, 2, dropPkt)
+                HV.STATE.drop_confirmed = true
+            end
+            return true -- Consume and block native dialog from remaining open on screen
+        end
+        return false
+    end)
+    if ok and shouldBlock then return true end
+    return false
 end
 
 local function onSendPacketRawHook(raw)
     if not HV.STATE.running then return end
-    -- Blokir packet pickup (11) selama bot sedang drop agar tidak mengambil kembali item yang di-drop
-    if (HV.STATE.is_dropping or HV.STATE.anti_take) and raw and raw.type == 11 then
-        return true
+    -- Blokir packet pickup (11) selama bot sedang drop atau berada di save/event world
+    if raw and raw.type == 11 then
+        if HV.STATE.in_save_world or HV.STATE.in_event_world or HV.STATE.is_dropping or HV.STATE.anti_take then
+            return true
+        end
+        if HV.CFG.ignore_take_drop and (HV.STATE.in_save_world or HV.STATE.in_event_world) then
+            return true
+        end
     end
     if raw and raw.type == 10 and raw.value then
         if raw.value == ITEM.SORROWS or raw.value == ITEM.HARVESTER then
@@ -962,22 +1003,26 @@ end
 if AddHook then
     pcall(AddHook, "OnSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
     pcall(AddHook, "OnVariantList", "boren_hv_var_hook", onVariantHook)
+    pcall(AddHook, "OnVariant", "boren_hv_var_hook2", onVariantHook)
     pcall(AddHook, "OnSendPacket", "boren_hv_send_hook", onSendPacketHook)
 elseif addHook then
     pcall(addHook, onSendPacketRawHook, "onsendpacketraw")
     pcall(addHook, "onSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
     pcall(addHook, "OnSendPacketRaw", "boren_hv_raw_hook", onSendPacketRawHook)
+    pcall(addHook, onVariantHook, "onvariant")
     pcall(addHook, onVariantHook, "onvariantlist")
+    pcall(addHook, "onVariant", "boren_hv_var_hook", onVariantHook)
+    pcall(addHook, "OnVariant", "boren_hv_var_hook", onVariantHook)
     pcall(addHook, "onVariantList", "boren_hv_var_hook", onVariantHook)
     pcall(addHook, "OnVariantList", "boren_hv_var_hook", onVariantHook)
     pcall(addHook, onSendPacketHook, "onsendpacket")
     pcall(addHook, "onSendPacket", "boren_hv_send_hook", onSendPacketHook)
     pcall(addHook, "OnSendPacket", "boren_hv_send_hook", onSendPacketHook)
-    onSendPacketRaw = onSendPacketRawHook
-    OnSendPacketRaw = onSendPacketRawHook
-    onSendPacket = onSendPacketHook
-    OnSendPacket = onSendPacketHook
 end
+onVariant = onVariantHook
+OnVariant = onVariantHook
+onVariantList = onVariantHook
+OnVariantList = onVariantHook
 onSendPacketRaw = onSendPacketRawHook
 OnSendPacketRaw = onSendPacketRawHook
 onSendPacket = onSendPacketHook
@@ -985,36 +1030,90 @@ OnSendPacket = onSendPacketHook
 if applyHook then pcall(applyHook) end
 if ApplyHook then pcall(ApplyHook) end
 
+
 -- ============================================================================
--- 4. DROP ENGINE (DROP SEBELAH DOOR, DARI KANAN KE KIRI, ZIGZAG TINGKAT KE ATAS/BAWAH)
+-- 4. DROP ENGINE (DROP DI KANAN DOOR ID, URUT & RAPI, MAX 4K PER TILE / SPOT KOSONG)
 -- ============================================================================
-local function countDroppedOnTile(tx, ty)
+local function getSpawnDoorPos()
+    local px, py = getPlayerPos()
+    if not px or not py then
+        return 2, 2
+    end
+    px = math.floor(px)
+    py = math.floor(py)
+
+    -- 1. Cek tepat di posisi spawn bot
+    local t0 = getTileSafe(px, py)
+    if t0 then
+        local fg0 = tonumber(t0.fg) or 0
+        if fg0 == 6 or fg0 == 8 or fg0 == 12 or fg0 == 242 or LOCK_OR_DOOR_IDS[fg0] then
+            return px, py
+        end
+    end
+
+    -- 2. Cek radius 1-2 tile di sekitar spawn bot (karena saat spawn, bot bisa berdiri di samping door)
+    local offsets = {
+        {0, 0}, {0, 1}, {0, -1}, {1, 0}, {-1, 0},
+        {1, 1}, {-1, 1}, {1, -1}, {-1, -1},
+        {0, 2}, {0, -2}, {2, 0}, {-2, 0}
+    }
+    for _, off in ipairs(offsets) do
+        local tx, ty = px + off[1], py + off[2]
+        local t = getTileSafe(tx, ty)
+        if t then
+            local fg = tonumber(t.fg) or 0
+            if fg == 6 or fg == 8 or fg == 12 or fg == 242 or LOCK_OR_DOOR_IDS[fg] then
+                return tx, ty
+            end
+        end
+    end
+
+    return px, py
+end
+
+local function inspectTileDropped(tx, ty)
     local total = 0
+    local itemCounts = {}
     forEachWorldObject(function(oid, uid, amt, ox, oy)
-        local otx = math.floor(((ox or 0) + 10) / 32)
-        local oty = math.floor(((oy or 0) + 10) / 32)
+        local otx = math.floor((ox or 0) / 32)
+        local oty = math.floor((oy or 0) / 32)
         if otx == tx and oty == ty then
-            total = total + (tonumber(amt) or 1)
+            local count = tonumber(amt) or 1
+            total = total + count
+            if oid then itemCounts[oid] = (itemCounts[oid] or 0) + count end
         end
     end)
+    return total, itemCounts
+end
+
+local function countDroppedOnTile(tx, ty)
+    local total, _ = inspectTileDropped(tx, ty)
     return total
 end
 
 local function isTileCleanForDrop(tx, ty, doorX, doorY)
-    if tx < 2 or tx > 97 or ty < 1 or ty > 53 then return false end
+    if tx < 1 or tx > 97 or ty < 1 or ty > 53 then return false end
     if tx == doorX and ty == doorY then return false end
     if isTileBlocked(tx, ty) then return false end
     local t = getTileSafe(tx, ty)
-    if t and t.collidable then return false end
+    if t then
+        local fg = tonumber(t.fg) or 0
+        if LOCK_OR_DOOR_IDS[fg] then return false end
+        if fg > 0 and t.collidable then return false end
+    end
     return true
 end
 
 local function isTileCleanForStand(tx, ty, doorX, doorY)
-    if tx < 2 or tx > 98 or ty < 1 or ty > 53 then return false end
+    if tx < 1 or tx > 98 or ty < 1 or ty > 53 then return false end
     if tx == doorX and ty == doorY then return false end
     if isTileBlocked(tx, ty) then return false end
     local t = getTileSafe(tx, ty)
-    if t and t.collidable then return false end
+    if t then
+        local fg = tonumber(t.fg) or 0
+        if LOCK_OR_DOOR_IDS[fg] then return false end
+        if fg > 0 and t.collidable then return false end
+    end
     return true
 end
 
@@ -1030,9 +1129,21 @@ local function faceLeft(standX, standY)
     end
 end
 
-local function moveToStand(standX, standY)
+local function faceRight(standX, standY)
+    if sendPacketRaw then
+        pcall(sendPacketRaw, false, {
+            type  = 0,
+            pos   = { x = standX * 32, y = standY * 32 },
+            x     = standX * 32,
+            y     = standY * 32,
+            state = 0 -- 0 = Normal / Menghadap ke kanan
+        })
+    end
+end
+
+local function moveToStand(standX, standY, faceDir)
     if not HV.STATE.running then return false end
-    standX = math.max(2, math.min(98, math.floor(standX or 0)))
+    standX = math.max(1, math.min(98, math.floor(standX or 0)))
     standY = math.max(1, math.min(53, math.floor(standY or 0)))
 
     if editToggle then
@@ -1043,7 +1154,7 @@ local function moveToStand(standX, standY)
 
     local curPx, curPy = getPlayerPos()
     if curPx == standX and curPy == standY then
-        faceLeft(standX, standY)
+        if faceDir == "right" then faceRight(standX, standY) else faceLeft(standX, standY) end
         return true
     end
 
@@ -1051,21 +1162,21 @@ local function moveToStand(standX, standY)
     if pFn then
         pcall(pFn, standX, standY)
         local waited = 0
-        while waited < 1800 and HV.STATE.running do
-            safeSleep(50)
-            waited = waited + 50
+        while waited < 800 and HV.STATE.running do
+            safeSleep(30)
+            waited = waited + 30
             local px, py = getPlayerPos()
             if px == standX and py == standY then
-                faceLeft(standX, standY)
-                safeSleep(40)
+                if faceDir == "right" then faceRight(standX, standY) else faceLeft(standX, standY) end
+                safeSleep(20)
                 return true
             end
         end
     end
 
     moveSafeTo(standX, standY, true)
-    faceLeft(standX, standY)
-    safeSleep(50)
+    if faceDir == "right" then faceRight(standX, standY) else faceLeft(standX, standY) end
+    safeSleep(30)
     local fx, fy = getPlayerPos()
     return (fx == standX and fy == standY) or (fx and fy and math.abs(fx - standX) <= 1 and math.abs(fy - standY) <= 1)
 end
@@ -1082,34 +1193,29 @@ local function executeDropBatch(itemID, batch)
     HV.STATE.pending_drop_id = itemID
     HV.STATE.pending_drop_amt = batch
 
-    -- Matikan auto-collect & aktifkan anti-collect cheat
     setCollectCheats(false)
-    safeSleep(50)
+    safeSleep(20)
 
     -- Metode 1: Standard action|drop (memicu OnDialogRequest di server)
     if sendPacket then
         pcall(sendPacket, 2, "action|drop\n|itemID|" .. tostring(itemID))
-        safeSleep(140)
     end
 
     -- Metode 2: C++ engine direct drop confirmation
     if growtopia and growtopia.confirmDropItem then
         pcall(growtopia.confirmDropItem, itemID, batch)
-        safeSleep(140)
     end
 
     -- Metode 3: Standard packet drop_item / drop dialog return
     if sendPacket then
-        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop_item\nitemID|%d|\ncount|%d\n", itemID, batch))
-        safeSleep(100)
-        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop\nitemID|%d|\ncount|%d\n", itemID, batch))
-        safeSleep(100)
+        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop_item\nitemID|%d\ncount|%d\n", itemID, batch))
+        pcall(sendPacket, 2, string.format("action|dialog_return\ndialog_name|drop\nitemID|%d\ncount|%d\n", itemID, batch))
     end
 
     local waited = 0
-    while waited < 850 and HV.STATE.running do
-        safeSleep(50)
-        waited = waited + 50
+    while waited < 650 and HV.STATE.running do
+        safeSleep(30)
+        waited = waited + 30
         if getInvCount(itemID) < cur or HV.STATE.drop_confirmed then
             break
         end
@@ -1118,7 +1224,9 @@ local function executeDropBatch(itemID, batch)
     HV.STATE.pending_drop_id = 0
     HV.STATE.pending_drop_amt = 0
     HV.STATE.is_dropping = false
-    HV.STATE.anti_take = false
+    if not (HV.STATE.in_save_world or HV.STATE.in_event_world) then
+        HV.STATE.anti_take = false
+    end
 
     local after = getInvCount(itemID)
     if after < cur then
@@ -1128,19 +1236,45 @@ local function executeDropBatch(itemID, batch)
     return false, 0
 end
 
-local function dropOntoTileFromRight(dropX, dropY, itemID, maxCanDrop)
-    local standX = dropX + 1
-    local standY = dropY
-
-    local existingOnTile = countDroppedOnTile(dropX, dropY)
+local function dropOntoTile(dropX, dropY, itemID, maxCanDrop, doorX, doorY)
+    local existingOnTile, itemCounts = inspectTileDropped(dropX, dropY)
     if existingOnTile >= 4000 then
         return false, 0, true
     end
 
-    if not moveToStand(standX, standY) then
+    -- Jika tile sudah ada item lain yang bukan itemID ini, geser ke spot berikutnya agar rapi
+    for oid, _ in pairs(itemCounts) do
+        if oid ~= itemID then
+            return false, 0, true
+        end
+    end
+
+    -- Tentukan posisi berdiri bot:
+    -- 1. Berdiri di kanan dropX (dropX + 1) menghadap ke kiri (prioritas utama, rapi di kanan pintu)
+    -- 2. Jika dropX + 1 terhalang tembok, berdiri di kiri (dropX - 1) menghadap kanan
+    -- 3. Berdiri tepat di atas tile dropX
+    local chosenStandX = nil
+    local chosenFace = "left"
+
+    if (dropX + 1) <= 98 and isTileCleanForStand(dropX + 1, dropY, doorX, doorY) then
+        chosenStandX = dropX + 1
+        chosenFace = "left"
+    elseif (dropX - 1) >= 1 and (dropX - 1 ~= doorX or dropY ~= doorY) and isTileCleanForStand(dropX - 1, dropY, doorX, doorY) then
+        chosenStandX = dropX - 1
+        chosenFace = "right"
+    elseif isTileCleanForStand(dropX, dropY, doorX, doorY) then
+        chosenStandX = dropX
+        chosenFace = "left"
+    end
+
+    if not chosenStandX then
         return false, 0, false
     end
-    faceLeft(standX, standY)
+
+    if not moveToStand(chosenStandX, dropY, chosenFace) then
+        return false, 0, false
+    end
+    if chosenFace == "right" then faceRight(chosenStandX, dropY) else faceLeft(chosenStandX, dropY) end
 
     local droppedOnTile = 0
     local failCount = 0
@@ -1166,25 +1300,27 @@ local function dropOntoTileFromRight(dropX, dropY, itemID, maxCanDrop)
         end
 
         HV.STATE.status_text = string.format("Drop %d ke (%d,%d)...", batch, dropX, dropY)
-        faceLeft(standX, standY)
+        if chosenFace == "right" then faceRight(chosenStandX, dropY) else faceLeft(chosenStandX, dropY) end
         local ok, delta = executeDropBatch(itemID, batch)
         if ok and delta > 0 then
             droppedOnTile = droppedOnTile + delta
             HV.STATE.total_dropped = HV.STATE.total_dropped + delta
             failCount = 0
-            safeSleep(150)
+            safeSleep(100)
             if (existingOnTile + droppedOnTile) >= 4000 then
                 return true, droppedOnTile, true
             end
         else
             failCount = failCount + 1
-            safeSleep(150)
+            safeSleep(120)
         end
     end
 
     local tileFull = (failCount >= 2) or ((existingOnTile + droppedOnTile) >= 4000)
     return (droppedOnTile > 0), droppedOnTile, tileFull
 end
+
+local dropOntoTileFromRight = dropOntoTile -- Alias backward compatibility
 
 local function dropItemAllInCurrentWorld(itemID, label, maxQuota)
     local cur = getInvCount(itemID)
@@ -1197,54 +1333,62 @@ local function dropItemAllInCurrentWorld(itemID, label, maxQuota)
     end
     setCollectCheats(false)
 
-    local px, py = getPlayerPos()
-    local doorX, doorY = px or 2, py or 2
-    for dy = -2, 2 do
-        for dx = -2, 2 do
-            local t = getTileSafe(px + dx, py + dy)
-            if t and (tonumber(t.fg) == 6 or tonumber(t.fg) == 8) then
-                doorX, doorY = px + dx, py + dy
-                break
+    -- Deteksi titik spawn Door ID (lokasi bot mendarat saat warp)
+    local doorX, doorY = getSpawnDoorPos()
+    local totalDropped = 0
+
+    -- ========================================================================
+    -- PRIORITAS UTAMA: SEJAJAR DOOR ID (rowY = doorY) DARI KANAN DOOR (doorX + 1 .. 97)
+    -- Bot berdiri di kanan tile menghadap kiri, drop urut rapi max 4000 item per spot.
+    -- ========================================================================
+    local startX = math.max(1, doorX + 1)
+    for dropX = startX, 97 do
+        if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
+        if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
+
+        if isTileCleanForDrop(dropX, doorY, doorX, doorY) then
+            local quotaLeft = (maxQuota and maxQuota > 0) and (maxQuota - totalDropped) or nil
+            local ok, droppedAmt, tileFull = dropOntoTile(dropX, doorY, itemID, quotaLeft, doorX, doorY)
+            if droppedAmt > 0 then
+                totalDropped = totalDropped + droppedAmt
             end
         end
     end
 
-    -- 1. Baris utama sejajar pintu (y = doorY)
-    -- 2. Jika penuh naik satu tingkat lagi (doorY - 1, doorY - 2, ...)
-    -- 3. Jika atas habis, ke bawahnya (doorY + 1, doorY + 2, ...)
-    local candidateRows = { doorY }
-    for y = doorY - 1, 1, -1 do
-        table.insert(candidateRows, y)
-    end
-    for y = doorY + 1, 53 do
-        table.insert(candidateRows, y)
-    end
+    -- ========================================================================
+    -- CADANGAN OPSIONAL: HANYA JIKA SEMUA TILE DI BARISAN DOOR SUDAH 100% PENUH (4K)
+    -- atau terblokir, DAN bot MASIH memiliki sisa item di tas (getInvCount > 0)!
+    -- Mengisi baris atas (doorY - 1 .. 1), lalu baris bawah (doorY + 1 .. 53)
+    -- ========================================================================
+    if getInvCount(itemID) > 0 and HV.STATE.running and (not maxQuota or totalDropped < maxQuota) then
+        addLog(string.format("`e[Drop] Barisan Door ID (Y=%d) telah penuh! Mengisi baris atas sebagai cadangan...", doorY))
+        local fallbackRows = {}
+        for y = doorY - 1, 1, -1 do table.insert(fallbackRows, y) end
+        for y = doorY + 1, 53 do table.insert(fallbackRows, y) end
 
-    local totalDropped = 0
-
-    for _, rowY in ipairs(candidateRows) do
-        if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
-        if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
-
-        -- Sesuai gambar: Drop di sebelah door (area kosong) dari kanan tile target ke kiri
-        local startX = math.max(2, doorX + 1)
-        for dropX = startX, 97 do
+        for _, rowY in ipairs(fallbackRows) do
             if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
             if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
 
-            local standX = dropX + 1
-            if standX <= 98 and isTileCleanForDrop(dropX, rowY, doorX, doorY) and isTileCleanForStand(standX, rowY, doorX, doorY) then
-                local quotaLeft = (maxQuota and maxQuota > 0) and (maxQuota - totalDropped) or nil
-                local ok, droppedAmt, tileFull = dropOntoTileFromRight(dropX, rowY, itemID, quotaLeft)
-                if droppedAmt > 0 then
-                    totalDropped = totalDropped + droppedAmt
+            for dropX = startX, 97 do
+                if getInvCount(itemID) <= 0 or not HV.STATE.running then break end
+                if maxQuota and maxQuota > 0 and totalDropped >= maxQuota then break end
+
+                if isTileCleanForDrop(dropX, rowY, doorX, doorY) then
+                    local quotaLeft = (maxQuota and maxQuota > 0) and (maxQuota - totalDropped) or nil
+                    local ok, droppedAmt, tileFull = dropOntoTile(dropX, rowY, itemID, quotaLeft, doorX, doorY)
+                    if droppedAmt > 0 then
+                        totalDropped = totalDropped + droppedAmt
+                    end
                 end
             end
         end
     end
 
     HV.STATE.is_dropping = false
-    HV.STATE.anti_take = false
+    if not (HV.STATE.in_save_world or HV.STATE.in_event_world) then
+        HV.STATE.anti_take = false
+    end
     local remaining = getInvCount(itemID)
     return (remaining == 0), totalDropped
 end
@@ -1259,6 +1403,11 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
         addLog("`4[Save World] Daftar Save World kosong! Tambahkan di tab Save World.")
         return false
     end
+
+    -- Kunci anti_take & in_save_world selama di Save World
+    HV.STATE.in_save_world = true
+    HV.STATE.anti_take = true
+    setCollectCheats(false)
 
     local itemsToDrop = {}
     if bCnt > 0 then table.insert(itemsToDrop, { id = blockID, name = "Block", isBlock = true }) end
@@ -1328,7 +1477,12 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
 
     if returnFarm and HV.STATE.running then
         warpToWorld(returnFarm.name, returnFarm.door)
+        HV.STATE.in_save_world = false
+        HV.STATE.anti_take = false
         setCollectCheats(true)
+    else
+        HV.STATE.in_save_world = false
+        HV.STATE.anti_take = false
     end
     return (getInvCount(blockID) == 0 and getInvCount(seedID) == 0)
 end
@@ -1346,6 +1500,11 @@ local function dropToEventWorlds(returnFarm)
         addLog("`e[Event World] World Event belum diatur (opsional) — melewati drop event.")
         return true
     end
+
+    -- Kunci anti_take & in_event_world selama di Event World
+    HV.STATE.in_event_world = true
+    HV.STATE.anti_take = true
+    setCollectCheats(false)
 
     for _, itmID in ipairs(toDrop) do
         local curAmt = getInvCount(itmID)
@@ -1400,7 +1559,12 @@ local function dropToEventWorlds(returnFarm)
 
     if returnFarm and HV.STATE.running then
         warpToWorld(returnFarm.name, returnFarm.door)
+        HV.STATE.in_event_world = false
+        HV.STATE.anti_take = false
         setCollectCheats(true)
+    else
+        HV.STATE.in_event_world = false
+        HV.STATE.anti_take = false
     end
     return true
 end
@@ -1506,22 +1670,60 @@ local function ensureGearAndFuel(returnFarm)
 end
 
 -- ============================================================================
--- 6. HARVEST ENGINE (3-ZIGZAG / 1BY1 + TAKE FLOATING + AUTO DROP)
+-- 6. HARVEST ENGINE (PER-TREE TELEPORT + FAST TAKE + ZERO MISS AUDIT)
 -- ============================================================================
 local function isTileTreeReady(t)
     if not t then return false end
+    local fg = tonumber(t.fg) or 0
+    if fg <= 0 then return false end
+
+    -- 1. Explicit ready flags from various Growlauncher versions
     if t.readyharvest == true or t.readyharvest == 1 or t.readyharvest == "true" then return true end
-    if t.ready_to_harvest == true or t.ready_to_harvest == 1 then return true end
-    if t.canHarvest and type(t.canHarvest) == "function" then
-        local okH, resH = pcall(t.canHarvest, t)
-        if okH and resH == true then return true end
-    end
-    if tonumber(t.progress) and tonumber(t.progress) >= 1.0 then return true end
-    if t.extra and type(t.extra) == "table" then
-        if tonumber(t.extra.growth) == 0 and (tonumber(t.extra.fruitcount) or 0) > 0 then
+    if t.ready_to_harvest == true or t.ready_to_harvest == 1 or t.ready_to_harvest == "true" then return true end
+    if t.ready_harvest == true or t.ready_harvest == 1 or t.ready_harvest == "true" then return true end
+    if t.ready == true or t.ready == 1 or t.ready == "true" then return true end
+
+    -- 2. canHarvest / can_harvest (bisa boolean atau fungsi)
+    if t.canHarvest ~= nil then
+        if type(t.canHarvest) == "function" then
+            local ok, res = pcall(t.canHarvest, t)
+            if ok and res == true then return true end
+        elseif t.canHarvest == true or t.canHarvest == 1 then
             return true
         end
     end
+    if t.can_harvest ~= nil then
+        if type(t.can_harvest) == "function" then
+            local ok, res = pcall(t.can_harvest, t)
+            if ok and res == true then return true end
+        elseif t.can_harvest == true or t.can_harvest == 1 then
+            return true
+        end
+    end
+
+    -- 3. Progress (>= 1.0 float atau >= 100 percentage)
+    local prog = tonumber(t.progress)
+    if prog and (prog >= 1.0 or prog >= 100) then return true end
+
+    -- 4. Tile flags (Growtopia mature tree flag 0x0010)
+    local flags = tonumber(t.flags)
+    if flags and bit32 and bit32.band(flags, 0x10) ~= 0 then return true end
+    if flags and (flags % 32 >= 16) then return true end
+
+    -- 5. Extra table (growth <= 0 dan fruit count > 0)
+    if t.extra and type(t.extra) == "table" then
+        local fCount = tonumber(t.extra.fruitcount or t.extra.fruit_count or t.extra.fruits or t.extra.fruit) or 0
+        if fCount > 0 then return true end
+        local growth = tonumber(t.extra.growth or t.extra.time_left or t.extra.grow_time)
+        if growth and growth <= 0 and (fg % 2 == 1) then
+            return true
+        end
+    end
+
+    -- 6. Direct fruitcount on tile
+    local directFruits = tonumber(t.fruitcount or t.fruit_count or t.fruits) or 0
+    if directFruits > 0 then return true end
+
     return false
 end
 
@@ -1542,25 +1744,191 @@ local function isReadyTree(tx, ty, seedID, blockID)
     return isTileTreeReady(t)
 end
 
--- Validasi pukulan pohon: memastikan pohon benar-benar telah dipanen (hancur)
-local function harvestTreeTile(tx, ty, seedID, blockID, hDelay)
-    for attempt = 1, 4 do
+local function isTreeBroken(tx, ty, seedID, blockID)
+    local t = getTileSafe(tx, ty)
+    if not t then return true end
+    local fg = tonumber(t.fg) or 0
+    if fg <= 0 then return true end
+    if seedID and seedID > 0 and fg ~= seedID and fg ~= blockID then
+        return true
+    end
+    return not isTileTreeReady(t)
+end
+
+local function teleportToTree(tx, ty)
+    if not HV.STATE.running then return false end
+    if editToggle then
+        pcall(editToggle, "ModFly", true)
+    end
+    local pFn = FindPath or findPath
+    if pFn then
+        pcall(pFn, tx, ty)
+    end
+    if sendPacketRaw then
+        pcall(sendPacketRaw, false, {
+            type  = 0,
+            pos   = { x = tx * 32, y = ty * 32 },
+            x     = tx * 32,
+            y     = ty * 32,
+            state = 32
+        })
+    end
+    local curX, curY = getPlayerPos()
+    if curX == tx and curY == ty then return true end
+
+    local waited = 0
+    while waited < 60 and HV.STATE.running do
+        safeSleep(15)
+        waited = waited + 15
+        local px, py = getPlayerPos()
+        if px == tx and py == ty then return true end
+    end
+    moveSafeTo(tx, ty, true)
+    return true
+end
+
+local function fastTakeAround(allowedSet, rad)
+    rad = rad or 4
+    local px, py = getPlayerPos()
+    if not px or not py then return end
+    forEachWorldObject(function(oid, uid, amt, ox, oy)
+        if HV.CFG.ignore_gems and oid == ITEM.GEMS then return end
+        if (not allowedSet) or allowedSet[oid] then
+            local otx = math.floor((ox or 0) / 32)
+            local oty = math.floor((oy or 0) / 32)
+            if math.abs(otx - px) <= rad and math.abs(oty - py) <= rad then
+                if sendPacketRaw then
+                    pcall(sendPacketRaw, false, { type = 11, value = uid, x = ox, y = oy })
+                end
+                if collectObject then pcall(collectObject, uid)
+                elseif CollectObject then pcall(CollectObject, uid) end
+            end
+        end
+    end)
+end
+
+-- Validasi pukulan pohon: memastikan pohon benar-benar telah dipanen (hancur), responsif dan cepat
+local function harvestTreeTile(tx, ty, seedID, blockID, hDelay, allowedSet)
+    if not isReadyTree(tx, ty, seedID, blockID) then return true end
+    local maxWait = math.max(50, math.min(250, tonumber(hDelay) or 120))
+    for attempt = 1, 3 do
         if not HV.STATE.running then return false end
         punchTile(tx, ty)
-        safeSleep(hDelay)
 
-        -- Validasi: cek apakah pohon di tile (tx, ty) sudah pecah/habis
-        if not isReadyTree(tx, ty, seedID, blockID) then
-            HV.STATE.total_harvested = HV.STATE.total_harvested + 1
-            return true
+        -- Reactive polling 15ms: langsung lanjut begitu pohon pecah (tidak delay kaku statis)
+        local waited = 0
+        while waited < maxWait and HV.STATE.running do
+            safeSleep(15)
+            waited = waited + 15
+            if isTreeBroken(tx, ty, seedID, blockID) then
+                HV.STATE.total_harvested = HV.STATE.total_harvested + 1
+                if allowedSet then fastTakeAround(allowedSet, 4) end
+                return true
+            end
         end
-        safeSleep(50)
     end
-    if not isReadyTree(tx, ty, seedID, blockID) then
+    if isTreeBroken(tx, ty, seedID, blockID) then
         HV.STATE.total_harvested = HV.STATE.total_harvested + 1
+        if allowedSet then fastTakeAround(allowedSet, 4) end
         return true
     end
     return false
+end
+
+local function scanWorldReadyTrees(seedID, blockID)
+    local trees = {}
+    for ty = 1, 53 do
+        for tx = 2, 97 do
+            if isReadyTree(tx, ty, seedID, blockID) then
+                table.insert(trees, { x = tx, y = ty })
+            end
+        end
+    end
+    -- Urutkan baris per baris (y=1..53) secara serpentine untuk minim jarak teleport antar pohon
+    table.sort(trees, function(a, b)
+        if a.y ~= b.y then
+            return a.y < b.y
+        end
+        if (a.y % 2 == 1) then
+            return a.x < b.x
+        else
+            return a.x > b.x
+        end
+    end)
+    return trees
+end
+
+local function scanRemainingReadyTrees(seedID, blockID)
+    return scanWorldReadyTrees(seedID, blockID)
+end
+
+local function harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
+    local maxPasses = 3
+    for pass = 1, maxPasses do
+        if not HV.STATE.running then return false end
+        local treeList = scanWorldReadyTrees(seedID, blockID)
+        local totalCount = #treeList
+        if totalCount == 0 then
+            addLog(string.format("`2[Validasi Pohon] Selesai 100%%! Tidak ada pohon tersisa di %s.", row.name))
+            break
+        end
+
+        addLog(string.format("`a[Harvest Per-Tree] Memanen %d pohon di %s (Pass %d/%d)...", totalCount, row.name, pass, maxPasses))
+
+        for i, tr in ipairs(treeList) do
+            if not HV.STATE.running then return false end
+            if not ensureHVOnline(row, true) then return false end
+
+            if isReadyTree(tr.x, tr.y, seedID, blockID) then
+                if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+
+                HV.STATE.status_text = string.format("Panen [%d/%d] (%d,%d)...", i, totalCount, tr.x, tr.y)
+
+                -- Teleport langsung ke pohon
+                teleportToTree(tr.x, tr.y)
+
+                -- Fast take sebelum & sesudah punch
+                fastTakeAround(allowedSet, 4)
+
+                -- Panen pohon secara responsif
+                harvestTreeTile(tr.x, tr.y, seedID, blockID, hDelay, allowedSet)
+
+                -- Micro sleep agar pacing seimbang
+                safeSleep(15)
+            end
+        end
+
+        safeSleep(100)
+    end
+    return true
+end
+
+local function auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
+    local maxPasses = 3
+    for pass = 1, maxPasses do
+        if not HV.STATE.running then return false end
+        local remaining = scanWorldReadyTrees(seedID, blockID)
+        if #remaining == 0 then
+            return true
+        end
+
+        addLog(string.format("`e[Audit Pohon] Ditemukan %d sisa pohon matang di %s (Audit %d/%d) — membersihkan...", #remaining, row.name, pass, maxPasses))
+        HV.STATE.status_text = string.format("Membersihkan %d sisa pohon...", #remaining)
+
+        for _, tr in ipairs(remaining) do
+            if not HV.STATE.running then return false end
+            if not ensureHVOnline(row, true) then return false end
+            if isReadyTree(tr.x, tr.y, seedID, blockID) then
+                if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+                teleportToTree(tr.x, tr.y)
+                fastTakeAround(allowedSet, 4)
+                harvestTreeTile(tr.x, tr.y, seedID, blockID, hDelay, allowedSet)
+                safeSleep(15)
+            end
+        end
+        safeSleep(120)
+    end
+    return true
 end
 
 local function updateInvPreview(blockID, seedID, eventList)
@@ -1696,38 +2064,39 @@ local function processFarmWorld(row)
         end
     end
 
-    local hDelay = math.max(90, tonumber(HV.CFG.harvest_delay) or 180)
-    local isZigzag = (HV.CFG.harvest_mode == "3zigzag")
+    local hDelay = math.max(60, tonumber(HV.CFG.harvest_delay) or 120)
+    local mode = HV.CFG.harvest_mode or "teleport"
 
-    -- 1. Scan semua baris di world yang memiliki pohon matang, urutkan dari PALING ATAS (ty = 1..53)
-    local treeRows = {}
-    for testY = 1, 53 do
-        local hasTree = false
-        for testX = 2, 97 do
-            if isReadyTree(testX, testY, seedID, blockID) then
-                hasTree = true
-                break
+    if mode == "teleport" then
+        -- Mode Utama & Direkomendasikan: Teleport Per Tree + Fast Take (Responsif & Cepat)
+        harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
+    elseif mode == "3zigzag" then
+        -- Mode 3-Zigzag Klasik
+        local treeRows = {}
+        for testY = 1, 53 do
+            local hasTree = false
+            for testX = 2, 97 do
+                if isReadyTree(testX, testY, seedID, blockID) then
+                    hasTree = true
+                    break
+                end
+            end
+            if hasTree then
+                table.insert(treeRows, testY)
             end
         end
-        if hasTree then
-            table.insert(treeRows, testY)
-        end
-    end
 
-    -- 2. Mulai panen dari baris PALING ATAS, dari posisi PALING KIRI
-    local rowCount = 0
-    for _, ty in ipairs(treeRows) do
-        if not HV.STATE.running then return false end
-        rowCount = rowCount + 1
-        local l2r = (rowCount % 2 == 1) -- Baris pertama (paling atas) selalu l2r = true (KIRI ke KANAN)
-        local startX = l2r and 2 or 97
-        local endX   = l2r and 97 or 2
-        local stepX  = l2r and 1 or -1
+        local rowCount = 0
+        for _, ty in ipairs(treeRows) do
+            if not HV.STATE.running then return false end
+            rowCount = rowCount + 1
+            local l2r = (rowCount % 2 == 1)
+            local startX = l2r and 2 or 97
+            local endX   = l2r and 97 or 2
+            local stepX  = l2r and 1 or -1
+            local py = ty + 1
 
-        local py = ty + 1 -- Lantai tempat pohon berpijak
-
-        if not ensureHVOnline(row, true) then return false end
-        if isZigzag then
+            if not ensureHVOnline(row, true) then return false end
             local x = startX
             while (l2r and x <= endX) or ((not l2r) and x >= endX) do
                 if not HV.STATE.running then return false end
@@ -1743,20 +2112,47 @@ local function processFarmWorld(row)
                     local tFloor = getTileSafe(x, py)
                     if tFloor and tFloor.collidable then standY = ty end
                     moveSafeTo(x, standY)
-                    collectNearbyAllowed(allowedSet, 4)
+                    fastTakeAround(allowedSet, 4)
 
-                    -- Validasi pukulan pohon matang
-                    if t1 then harvestTreeTile(x, ty, seedID, blockID, hDelay) end
-                    if t2 then harvestTreeTile(x + stepX, ty, seedID, blockID, hDelay) end
-                    if t3 then harvestTreeTile(x + (stepX * 2), ty, seedID, blockID, hDelay) end
+                    if t1 then harvestTreeTile(x, ty, seedID, blockID, hDelay, allowedSet) end
+                    if t2 then harvestTreeTile(x + stepX, ty, seedID, blockID, hDelay, allowedSet) end
+                    if t3 then harvestTreeTile(x + (stepX * 2), ty, seedID, blockID, hDelay, allowedSet) end
 
-                    collectNearbyAllowed(allowedSet, 4)
+                    fastTakeAround(allowedSet, 4)
                     x = x + (stepX * 3)
                 else
                     x = x + stepX
                 end
             end
-        else
+        end
+        auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
+    else
+        -- Mode 1-By-1
+        local treeRows = {}
+        for testY = 1, 53 do
+            local hasTree = false
+            for testX = 2, 97 do
+                if isReadyTree(testX, testY, seedID, blockID) then
+                    hasTree = true
+                    break
+                end
+            end
+            if hasTree then
+                table.insert(treeRows, testY)
+            end
+        end
+
+        local rowCount = 0
+        for _, ty in ipairs(treeRows) do
+            if not HV.STATE.running then return false end
+            rowCount = rowCount + 1
+            local l2r = (rowCount % 2 == 1)
+            local startX = l2r and 2 or 97
+            local endX   = l2r and 97 or 2
+            local stepX  = l2r and 1 or -1
+            local py = ty + 1
+
+            if not ensureHVOnline(row, true) then return false end
             for x = startX, endX, stepX do
                 if not HV.STATE.running then return false end
                 if not ensureHVOnline(row, true) then return false end
@@ -1766,16 +2162,17 @@ local function processFarmWorld(row)
                     local tFloor = getTileSafe(x, py)
                     if tFloor and tFloor.collidable then standY = ty end
                     moveSafeTo(x, standY)
-                    collectNearbyAllowed(allowedSet, 4)
-
-                    -- Validasi pukulan pohon matang
-                    harvestTreeTile(x, ty, seedID, blockID, hDelay)
-
-                    collectNearbyAllowed(allowedSet, 4)
+                    fastTakeAround(allowedSet, 4)
+                    harvestTreeTile(x, ty, seedID, blockID, hDelay, allowedSet)
+                    fastTakeAround(allowedSet, 4)
                 end
             end
         end
+        auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
     end
+
+    -- Audit & Validasi sisa pohon: pastikan 100% pohon matang telah dipanen dan tidak ada tersisa
+    auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
 
     -- Sapu sisa floating block / seed / event jika opsi take_floating aktif
     sweepFloatingObjects(row, blockID, seedID, allowedSet, eventList)
@@ -1783,9 +2180,10 @@ local function processFarmWorld(row)
     -- Force drop semua hasil yang tersisa di tas sebelum pindah farm
     checkAndDropIfFull(row, blockID, seedID, eventList, true)
 
+    local remainingTrees = #scanWorldReadyTrees(seedID, blockID)
     row.status = "Done"
     HV.saveData()
-    addLog(string.format("`2World %s SELESAI dipanen!", row.name))
+    addLog(string.format("`2World %s SELESAI dipanen (Pohon tersisa: %d)!", row.name, remainingTrees))
     return true
 end
 
@@ -2718,6 +3116,13 @@ local function renderSettingsSub()
     if uiToggleBtn(c.ignore_gems, "hv_ig") then c.ignore_gems = not c.ignore_gems; HV.saveData() end
 
     uiGap(2)
+    ImGui.Text("Ignore Take di Save/Event  :"); ImGui.SameLine()
+    if uiToggleBtn(c.ignore_take_drop ~= false, "hv_itd") then
+        c.ignore_take_drop = not (c.ignore_take_drop ~= false)
+        HV.saveData()
+    end
+
+    uiGap(2)
     ImGui.Text("Auto Collect Block/Seed    :"); ImGui.SameLine()
     if uiToggleBtn(c.auto_collect, "hv_ac") then c.auto_collect = not c.auto_collect; HV.saveData() end
 
@@ -2936,9 +3341,10 @@ local function registerNativeHarvestUI()
     local uiSet = createNativeUI("5. Pengaturan & Delay", "Tune")
     uiSet:addLabelApp("Pengaturan Navigasi & Kecepatan", "Tune")
     uiSet:addToggle("Abaikan Gems (Anti Penuh Tas)", HV.CFG.ignore_gems ~= false, "hv_toggle_ignore_gems", false)
+    uiSet:addToggle("Ignore Take Drop di Save/Event", HV.CFG.ignore_take_drop ~= false, "hv_toggle_ignore_take_drop", false)
     uiSet:addToggle("Auto Collect Block & Seed", HV.CFG.auto_collect ~= false, "hv_toggle_auto_collect", false)
     uiSet:addToggle("Ambil Floating Item Sisa", HV.CFG.take_floating ~= false, "hv_toggle_take_floating", false)
-    uiSet:addToggle("Mode 3-Zigzag (OFF = 1-by-1)", HV.CFG.harvest_mode == "3zigzag", "hv_toggle_mode_zigzag", false)
+    uiSet:addToggle("Mode Teleport Fast (OFF = 3-Zigzag)", HV.CFG.harvest_mode == "teleport", "hv_toggle_mode_teleport", false)
     uiSet:addToggle("Gunakan ModFly saat Bergerak", HV.CFG.use_modfly ~= false, "hv_toggle_modfly", false)
     uiSet:addToggle("Looping Ulang Semua Farm", HV.CFG.loop_enabled == true, "hv_toggle_loop", false)
     uiSet:addDivider()
@@ -3140,6 +3546,9 @@ function OnValue(a1, a2, a3)
     elseif name == "hv_toggle_ignore_gems" then
         c.ignore_gems = (val == true)
         HV.saveData()
+    elseif name == "hv_toggle_ignore_take_drop" then
+        c.ignore_take_drop = (val == true)
+        HV.saveData()
     elseif name == "hv_toggle_auto_collect" then
         c.auto_collect = (val == true)
         HV.saveData()
@@ -3148,6 +3557,9 @@ function OnValue(a1, a2, a3)
         HV.saveData()
     elseif name == "hv_toggle_mode_zigzag" then
         c.harvest_mode = (val == true) and "3zigzag" or "1by1"
+        HV.saveData()
+    elseif name == "hv_toggle_mode_teleport" then
+        c.harvest_mode = (val == true) and "teleport" or "3zigzag"
         HV.saveData()
     elseif name == "hv_toggle_modfly" then
         c.use_modfly = (val == true)
@@ -3183,7 +3595,7 @@ if setOnValue then
         "hv_input_event_ids", "hv_btn_preset_mooncake", "hv_slider_event_threshold",
         "hv_input_gear_world", "hv_btn_add_cur_gear", "hv_toggle_magni_fuel", "hv_toggle_stop_no_fuel",
         "hv_slider_fuel_target", "hv_input_gear_equip_ids", "hv_btn_gear_preset_both", "hv_btn_gear_preset_harv", "hv_btn_gear_preset_dcs",
-        "hv_toggle_ignore_gems", "hv_toggle_auto_collect", "hv_toggle_take_floating",
+        "hv_toggle_ignore_gems", "hv_toggle_ignore_take_drop", "hv_toggle_auto_collect", "hv_toggle_take_floating",
         "hv_toggle_mode_zigzag", "hv_toggle_modfly", "hv_toggle_loop",
         "hv_slider_harvest_delay", "hv_slider_step_delay", "hv_slider_warp_delay",
     }

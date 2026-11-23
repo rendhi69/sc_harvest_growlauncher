@@ -1,20 +1,14 @@
 -- ============================================================================
--- LOADER BOREN STORE - BOREN STORE - AUTO HARVEST PRO (CONSOLE IMGUI)
+-- LOADER BOREN STORE - AUTO HARVEST PRO (NATIVE UI GROWLAUNCHER)
 -- File: loader_harvest.lua
 -- ============================================================================
--- Memuat antarmuka Console ImGui khusus Harvest.
--- 100% Berbasis antarmuka Console ImGui Modern (Bukan Menu Native Lama).
--- Dilengkapi auto-fetch dari GitHub, cache-busting, dan fallback file lokal.
--- Repo: https://github.com/rendhi69/sc_harvest_growlauncher.git
+-- Skrip ini memuat antarmuka Native Menu bawaan Growlauncher (Auto Harvest Pro).
+-- Mengambil file skrip terbaru langsung dari GitHub (sc_harvest_growlauncher)
+-- atau fallback ke penyimpanan file lokal perangkat jika offline.
 -- ============================================================================
 
 local BASE_URL = "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/main/"
-local BOOT_PATH = "imgui_hub/boot.lua"
-local TARGET_FEATURE = "harvest"
-
--- Set target fitur awal & mode fokus console
-_G.__BOREN_INITIAL_FEATURE = TARGET_FEATURE
-_G.__BOREN_SINGLE_FEATURE = "harvest"
+local TARGET_FILE = "auto_harvest.lua"
 
 local function makeTag()
     if getTime then
@@ -33,7 +27,7 @@ local function makeTag()
 end
 
 local function logMsg(msg)
-    if LogToConsole then pcall(LogToConsole, "`e[BOREN HARVEST] `w" .. tostring(msg)) end
+    if LogToConsole then pcall(LogToConsole, "`e[BOREN HARVEST PRO] `w" .. tostring(msg)) end
 end
 
 local function notifyUser(msg)
@@ -41,12 +35,12 @@ local function notifyUser(msg)
     elseif growtopia and growtopia.notify then pcall(growtopia.notify, tostring(msg)) end
 end
 
-logMsg("`9Menghubungkan ke GitHub dan memuat Console HARVEST...")
-notifyUser("Memuat Console HARVEST...")
+logMsg("`9Menghubungkan ke GitHub dan memuat Auto Harvest Pro (Native UI)...")
+notifyUser("Memuat Auto Harvest Pro (Native UI)...")
 
 local code = nil
 if fetch then
-    local fetchUrl = BASE_URL .. BOOT_PATH .. "?v=" .. makeTag()
+    local fetchUrl = BASE_URL .. TARGET_FILE .. "?v=" .. makeTag()
     local okF, res = pcall(fetch, fetchUrl)
     if okF and type(res) == "string" and res ~= "" and not res:match("^404") and not res:match("^<!DOCTYPE") then
         code = res
@@ -58,11 +52,13 @@ if not code or code == "" then
         "/storage/emulated/0/Android/media/launcher.powerkuy.growlauncher/ScriptLua/",
         "/storage/emulated/0/Android/data/launcher.powerkuy.growlauncher/files/ScriptLua/",
         "/storage/emulated/0/Download/",
+        "script/script done dont edit/sc harvest/",
+        "script/script code/harvest/",
         "script/",
         "",
     }
     for _, root in ipairs(localRoots) do
-        local okO, f = pcall(io.open, root .. BOOT_PATH, "r")
+        local okO, f = pcall(io.open, root .. TARGET_FILE, "r")
         if okO and f then
             local txt = f:read("*a")
             f:close()
@@ -72,26 +68,25 @@ if not code or code == "" then
 end
 
 if not code or code == "" then
-    logMsg("`4Gagal memuat Console HARVEST! Periksa koneksi internet / file lokal.")
-    notifyUser("Gagal memuat Console!")
+    logMsg("`4Gagal memuat Auto Harvest Pro! Periksa koneksi internet / file lokal.")
+    notifyUser("Gagal memuat Auto Harvest Pro!")
     return
 end
 
 local loaderFn = loadstring or load
 local chunk, err = loaderFn(code)
 if not chunk then
-    logMsg("`4Error kompilasi boot console: " .. tostring(err))
-    notifyUser("Error kompilasi console!")
+    logMsg("`4Error kompilasi script: " .. tostring(err))
+    notifyUser("Error kompilasi Auto Harvest Pro!")
     return
 end
 
-local okRun, boot = pcall(chunk)
-if not okRun or type(boot) ~= "table" or type(boot.start) ~= "function" then
-    logMsg("`4Error inisialisasi boot: " .. tostring(boot))
-    notifyUser("Error inisialisasi console!")
+local okRun, ret = pcall(chunk)
+if not okRun then
+    logMsg("`4Error menjalankan script: " .. tostring(ret))
+    notifyUser("Error eksekusi Auto Harvest Pro!")
     return
 end
 
-boot.start(BASE_URL, TARGET_FEATURE)
-logMsg("`2Console HARVEST Siap Digunakan!")
-notifyUser("Console HARVEST Siap!")
+logMsg("`2Auto Harvest Pro (Native UI) Berhasil Dimuat ke Growlauncher!")
+notifyUser("Auto Harvest Pro Siap!")

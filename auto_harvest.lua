@@ -735,28 +735,117 @@ local function moveSafeTo(tx, ty, exact)
     end
 end
 
+local function isPlayerOnlineInWorld()
+    local p = getLocalSafe()
+    if not p then return false, "OFFLINE" end
+    local w = getCurrentWorldSafe()
+    if w == "" or w == "EXIT" then return false, "DISCONNECTED" end
+    return true, w
+end
+
+local function waitForWorldTiles(maxWaitMs)
+    local maxWait = maxWaitMs or 4000
+    local elapsed = 0
+    while elapsed < maxWait and HV.STATE.running do
+        local onlineNow = isPlayerOnlineInWorld()
+        if not onlineNow then return false end
+        local t0 = getTileSafe(0, 0)
+        local tSpawn = getTileSafe(2, 2)
+        if t0 or tSpawn then return true end
+        safeSleep(200)
+        elapsed = elapsed + 200
+    end
+    return true
+end
+
+local function ensureHVOnlineInWorld(targetWorld, doorID)
+    local maxWait = 25000
+    local waited = 0
+    while waited < maxWait and HV.STATE.running do
+        local online, curW = isPlayerOnlineInWorld()
+        if online and curW == targetWorld then
+            return true
+        end
+        if not online then
+            HV.STATE.status_text = "Menunggu Reconnect..."
+            addLog(string.format("[Koneksi Terputus] Menunggu koneksi pulih sebelum masuk ke %s (%ds)...", targetWorld, math.floor(waited / 1000)))
+            safeSleep(2000)
+            waited = waited + 2000
+        else
+            return true
+        end
+    end
+    local finalOnline = isPlayerOnlineInWorld()
+    return finalOnline == true
+end
+
 local function warpToWorldInner(wName, doorID)
     doorID = doorID or ""
     if wName == "" then return false end
-    unreachableMap = {}
-    if getCurrentWorldSafe() == wName and doorID == "" then return true end
-    if HUB_REF and HUB_REF.conn and HUB_REF.conn.isPlayerOnline and (not HUB_REF.conn.isPlayerOnline()) and (not HUB_REF.conn.isReconnecting()) then
-        local okOn = HUB_REF.conn.ensureOnline({ world = "", isRunning = function() HV.handleSendPacket = onSendPacketHook
-return HV.STATE.running end })
-        if not okOn then return false end
-    end
-    local joinStr = (doorID ~= "") and (wName .. "|" .. doorID) or wName
-    for _ = 1, 3 do
-        if not HV.STATE.running then return false end
-        if sendPacket then pcall(sendPacket, 3, "action|join_request\nname|" .. joinStr .. "\ninvitedWorld|0\n")
-        elseif growtopia and growtopia.warpTo then pcall(growtopia.warpTo, joinStr) end
-        local w, lim = 0, math.max(4000, tonumber(HV.CFG.warp_delay) or 4500)
-        while w < lim and HV.STATE.running do
-            safeSleep(250); w = w + 250
-            if getCurrentWorldSafe() == wName then safeSleep(600); return true end
+    wName = wName:upper():gsub("%s+", "")
+    doorID = doorID:gsub("%s+", "")
+
+    -- Cek status koneksi: jika sedang disconnect, tunggu reconnect dahulu
+    local onlineInit, curInit = isPlayerOnlineInWorld()
+    if not onlineInit then
+        addLog(string.format("[Warp Ditahan] Player sedang offline/disconnect (World: '%s'). Menunggu reconnect sebelum warp ke %s...", curInit, wName))
+        if not ensureHVOnlineInWorld(wName, doorID) then
+            return false
+        end
+        if getCurrentWorldSafe() == wName then
+            waitForWorldTiles(3000)
+            return true
         end
     end
-    return getCurrentWorldSafe() == wName
+
+    if getCurrentWorldSafe() == wName and doorID == "" then return true end
+
+    local joinStr = (doorID ~= "") and (wName .. "|" .. doorID) or wName
+    local warpDelay = math.max(4000, tonumber(HV.CFG.warp_delay) or 4500)
+
+    for attempt = 1, 4 do
+        if not HV.STATE.running then return false end
+        local onlineNow, cur = isPlayerOnlineInWorld()
+        if not onlineNow then
+            addLog(string.format("[Warp DC] Terputus saat proses warp ke %s! Menunggu koneksi pulih...", wName))
+            ensureHVOnlineInWorld(wName, doorID)
+            cur = getCurrentWorldSafe()
+            if cur == wName then
+                waitForWorldTiles(3500)
+                return true
+            end
+        end
+
+        if cur ~= wName then
+            if sendPacket then
+                pcall(sendPacket, 3, "action|join_request\nname|" .. joinStr .. "\ninvitedWorld|0\n")
+            elseif growtopia and growtopia.warpTo then
+                pcall(growtopia.warpTo, joinStr)
+            end
+
+            local elapsed = 0
+            while elapsed < warpDelay and HV.STATE.running do
+                safeSleep(250)
+                elapsed = elapsed + 250
+                local checkOnline, checkW = isPlayerOnlineInWorld()
+                if checkOnline and checkW == wName then
+                    safeSleep(500)
+                    waitForWorldTiles(3500)
+                    return true
+                end
+            end
+        else
+            waitForWorldTiles(2000)
+            return true
+        end
+    end
+
+    local finalOnline, finalW = isPlayerOnlineInWorld()
+    if not finalOnline then
+        addLog(string.format("[Warp DC] Gagal masuk ke %s karena koneksi terputus (bukan world inaccessible).", wName))
+        return false
+    end
+    return finalW == wName
 end
 
 local function warpToWorld(wName, doorID)
@@ -1497,7 +1586,7 @@ local function dropToEventWorlds(returnFarm)
 
     local rows = HV.STATE.event_rows
     if #rows == 0 then
-        addLog("`e[Event World] World Event belum diatur (opsional) — melewati drop event.")
+        addLog("`e[Event World] World Event belum diatur (opsional)     melewati drop event.")
         return true
     end
 
@@ -1517,7 +1606,7 @@ local function dropToEventWorlds(returnFarm)
             end
 
             if not targetRow then
-                addLog("`e[Event World] Semua World Event penuh / tidak tersedia — drop event dilewati.")
+                addLog("`e[Event World] Semua World Event penuh / tidak tersedia     drop event dilewati.")
                 return true
             end
 
@@ -1630,7 +1719,7 @@ local function ensureGearAndFuel(returnFarm)
     HV.STATE.status_text = "Gear World: " .. gw.name
     addLog("[Gear] Ambil perlengkapan / fuel di " .. gw.name)
     if not warpToWorld(gw.name, gw.door) then
-        addLog("`e[Gear] Gagal warp ke Gear World " .. gw.name .. " — melanjutkan harvest (Gear World opsional).")
+        addLog("`e[Gear] Gagal warp ke Gear World " .. gw.name .. "     melanjutkan harvest (Gear World opsional).")
         return true
     end
 
@@ -1657,7 +1746,7 @@ local function ensureGearAndFuel(returnFarm)
     end
 
     if c.auto_magni_fuel and c.stop_if_no_fuel and getInvCount(ITEM.FUEL_PACK) <= 0 and (gw and trimStr(c.gear_world or "") ~= "") then
-        addLog("`4[Fuel Guard] Stok Fuel Pack habis di tas & Gear World — bot berhenti aman!")
+        addLog("`4[Fuel Guard] Stok Fuel Pack habis di tas & Gear World     bot berhenti aman!")
         HV.STATE.status_text = "No Fuel Pack"
         return false
     end
@@ -1788,6 +1877,7 @@ local function teleportToTree(tx, ty)
 end
 
 local function fastTakeAround(allowedSet, rad)
+    if HV.STATE.in_save_world or HV.STATE.anti_take or HV.STATE.is_dropping then return end
     rad = rad or 4
     local px, py = getPlayerPos()
     if not px or not py then return end
@@ -1912,7 +2002,7 @@ local function auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowe
             return true
         end
 
-        addLog(string.format("`e[Audit Pohon] Ditemukan %d sisa pohon matang di %s (Audit %d/%d) — membersihkan...", #remaining, row.name, pass, maxPasses))
+        addLog(string.format("`e[Audit Pohon] Ditemukan %d sisa pohon matang di %s (Audit %d/%d)     membersihkan...", #remaining, row.name, pass, maxPasses))
         HV.STATE.status_text = string.format("Membersihkan %d sisa pohon...", #remaining)
 
         for _, tr in ipairs(remaining) do
@@ -2018,6 +2108,13 @@ local function processFarmWorld(row)
     row.status = "Warping..."
     HV.STATE.status_text = "Warp: " .. row.name
     if not warpToWorld(row.name, row.door) then
+        local _hvOnline = isPlayerOnlineInWorld()
+        if not _hvOnline then
+            row.status = "DC/Retry"
+            addLog("[Warp DC] Koneksi terputus saat warp ke " .. row.name .. " -- world ditahan, bukan Inaccessible.")
+            HV.saveData()
+            return false
+        end
         row.status = "Inaccessible"; HV.saveData(); return false
     end
     setCollectCheats(true)
@@ -2259,6 +2356,1289 @@ function HV.init(hub)
 end
 
 -- ============================================================================
+
+-- ============================================================================
+-- 7. REFINED MODULAR COMPACT DIALOG SYSTEM FOR HARVEST (/hv /harvest /boren)
+-- 100% Pure ASCII, 5-8 lines max per dialog, no vertical scrollbar
+-- ============================================================================
+
+local DLG = {
+    farm_page    = 1,
+    save_page    = 1,
+}
+
+-- ============================================================================
+-- 0. MAIN DASHBOARD DIALOG (/hv /harvest)
+-- ============================================================================
+DLG.showHarvestMainDialog = function()
+    local curW = getCurrentWorldSafe()
+    if curW == "" then curW = "EXIT" end
+    local isRun = HV.STATE.running
+    local stBadge = isRun and "`2(Running)" or "`4(Stopped)"
+    local fCount = #(HV.STATE.rows or {})
+    local sCount = #(HV.STATE.save_rows or {})
+    local harvCount = tonumber(HV.STATE.total_harvested) or 0
+    local dropCount = tonumber(HV.STATE.total_dropped) or 0
+    local modeTxt = (HV.CFG.harvest_mode == "teleport") and "`2(Teleport)" or ((HV.CFG.harvest_mode == "3zigzag") and "`b(3-Zigzag)" or "`e(1by1)")
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wBoren Auto Harvest Pro``|left|1830|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wStatus: %s `p- `wWorld: `b%s `p- `wMode: %s|left|", stBadge, curW, modeTxt),
+        string.format("add_textbox|`wFarms: `2(%d) `p- `wSaves: `2(%d) `p- `wTrees: `2(%d) `p- `wDrops: `2(%d)|left|", fCount, sCount, harvCount, dropCount),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+    }
+    if not isRun then
+        lines[#lines+1] = "add_button|hv_btn_dlg_start|`wStart Auto Harvest `2(Ready)|noflags|0|0|"
+    else
+        lines[#lines+1] = "add_button|hv_btn_dlg_stop|`wStop Auto Harvest `4(Active)|noflags|0|0|"
+    end
+    lines[#lines+1] = string.format("add_button|hv_btn_dlg_add_cur_farm|`wAdd World Farm `2(%s)|noflags|0|0|", curW)
+    lines[#lines+1] = "add_spacer|small|"
+    lines[#lines+1] = string.format("add_button|hv_btn_dlg_farms|`wSetting Farm Multi-World `2(%d World)|noflags|0|0|", fCount)
+    lines[#lines+1] = string.format("add_button|hv_btn_dlg_storage|`wSetting Storage Multi-World `2(%d World)|noflags|0|0|", sCount)
+    lines[#lines+1] = "add_button|hv_btn_dlg_collect|`wSetting Collect, Ignore & Floating|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_dlg_settings|`wSetting Harvest Engine & Cheats|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_dlg_logs|`wLog Activity & Tas|noflags|0|0|"
+    lines[#lines+1] = "add_spacer|small|"
+    lines[#lines+1] = "add_button|hv_btn_dlg_close|`wClose|noflags|0|0|"
+    lines[#lines+1] = "end_dialog|hv_main|Close||"
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- 1. SETTING FARM MULTI-WORLD (HUB + SUB-DIALOGS)
+-- ============================================================================
+DLG.showHarvestFarmDialog = function()
+    local fCount = #(HV.STATE.rows or {})
+    local defItem = tonumber(HV.CFG.default_item_id) or 4584
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wSetting Farm Multi-World``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wTotal Registered: `2(%d World) `p- `wDefault Item: `b%d|left|", fCount, defItem),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_button|hv_btn_open_add_farm|`w1. Add Farm World `2(Manual)|noflags|0|0|",
+        "add_button|hv_btn_open_batch_farm|`w2. Batch Add Farm World `2(Paste)|noflags|0|0|",
+        string.format("add_button|hv_btn_open_list_farm|`w3. List Farm Worlds `2(%d World)|noflags|0|0|", fCount),
+        "add_button|hv_btn_open_file_farm|`w4. Backup & File Manager|noflags|0|0|",
+        "add_button|hv_btn_dlg_reset_farm_st|`wReset Status Farm `4(Semua Ready)|noflags|0|0|",
+        "add_button|hv_btn_dlg_clear_farms|`wClear All Farm Worlds `4(Delete All)|noflags|0|0|",
+        "add_spacer|small|",
+        "add_button|hv_btn_dlg_back_main|`wBack|noflags|0|0|",
+        "end_dialog|hv_farms|Close||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 1.1 Add Single Farm World
+DLG.showHarvestAddFarmDialog = function()
+    local curW = getCurrentWorldSafe()
+    if curW == "" then curW = "EXIT" end
+    local defItem = tonumber(HV.CFG.default_item_id) or 4584
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wAdd Farm World``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wMasukkan nama world farm & ID item harvest:|left|",
+        "add_textbox|`p(Format: WORLD atau WORLD:DOOR atau WORLD:DOOR:ITEM_ID)|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_text_input|hv_in_farm_name|World Name||32|",
+        "add_text_input|hv_in_farm_door|Door ID (Opsional)||16|",
+        string.format("add_text_input|hv_in_farm_item|ID Item Harvest (Block/Seed)|%d|8|", defItem),
+        "add_spacer|small|",
+        "add_button|hv_btn_do_add_farm|`wSave Farm World `2(Add)|noflags|0|0|",
+        string.format("add_button|hv_btn_add_cur_farm_sub|`wAdd Current World `2(%s)|noflags|0|0|", curW),
+        "add_button|hv_btn_back_farms|`wBack|noflags|0|0|",
+        "end_dialog|hv_add_farm|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 1.2 Batch Add Farm Worlds
+DLG.showHarvestBatchFarmDialog = function()
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wBatch Add Farm Worlds``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wMasukkan daftar world dipisah spasi, koma atau enter:|left|",
+        "add_textbox|`p(Format: FARM1 FARM2:DOOR FARM3:DOOR:4584)|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_text_input|hv_in_batch_farms|World List||80|",
+        "add_checkbox|hv_chk_batch_farm_rep|Ganti seluruh daftar (Replace)|0|",
+        "add_spacer|small|",
+        "add_button|hv_btn_do_batch_farm|`wAdd All Worlds `2(Batch)|noflags|0|0|",
+        "add_button|hv_btn_back_farms|`wBack|noflags|0|0|",
+        "end_dialog|hv_batch_farm|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 1.3 List Farm Worlds (Paginated 5 per page)
+DLG.showHarvestFarmListDialog = function(page)
+    local list = HV.STATE.rows or {}
+    local count = #list
+    local perPage = 5
+    local totalPages = math.max(1, math.ceil(count / perPage))
+    page = math.max(1, math.min(totalPages, tonumber(page) or 1))
+    DLG.farm_page = page
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wList Farm Worlds``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wTotal Registered: `2(%d World) `p- `wPage `2(%d/%d)|left|", count, page, totalPages),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+    }
+
+    if count == 0 then
+        lines[#lines+1] = "add_textbox|`4(Antrian world farm masih kosong. Silakan tambah world)|left|"
+    else
+        local startIdx = (page - 1) * perPage + 1
+        local endIdx = math.min(count, startIdx + perPage - 1)
+        for i = startIdx, endIdx do
+            local item = list[i]
+            local dName = (item.door and item.door ~= "") and item.door or "-"
+            local st = (item.status == "Done") and "`2[DONE]" or ((item.status == "Warping...") and "`6[WARP]" or "`9[" .. tostring(item.status or "Ready") .. "]")
+            lines[#lines+1] = string.format("add_textbox|`w#%d `b%s `p[Door: `e%s`p] `o[Item: %d] %s|left|", i, item.name, dName, item.item_id or HV.CFG.default_item_id, st)
+            lines[#lines+1] = string.format("add_button|hv_btn_f_edit_%d|`wEdit `2(#%d)|noflags|0|0|", i, i)
+            lines[#lines+1] = string.format("add_button|hv_btn_f_del_%d|`wDelete `4(#%d)|noflags|0|0|", i, i)
+            lines[#lines+1] = "add_spacer|small|"
+        end
+    end
+
+    lines[#lines+1] = "add_spacer|small|"
+    if page > 1 then
+        lines[#lines+1] = string.format("add_button|hv_btn_f_prev_%d|`w<< Prev Page `2(%d)|noflags|0|0|", page - 1, page - 1)
+    end
+    if page < totalPages then
+        lines[#lines+1] = string.format("add_button|hv_btn_f_next_%d|`wNext Page >> `2(%d)|noflags|0|0|", page + 1, page + 1)
+    end
+    lines[#lines+1] = "add_button|hv_btn_dlg_clear_farms|`wClear All Worlds `4(Delete All)|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_back_farms|`wBack|noflags|0|0|"
+    lines[#lines+1] = "end_dialog|hv_list_farm|Close||"
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 1.4 Edit Farm World Entry
+DLG.showHarvestFarmEditDialog = function(idx)
+    idx = tonumber(idx) or 1
+    local entry = (HV.STATE.rows or {})[idx]
+    if not entry then return DLG.showHarvestFarmListDialog(1) end
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        string.format("add_label_with_icon|big|`wEdit Farm World #%d: %s``|left|18|", idx, entry.name),
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_text_input|hv_edit_f_name|World Name|%s|32|", entry.name or ""),
+        string.format("add_text_input|hv_edit_f_door|Door ID (Opsional)|%s|16|", entry.door or ""),
+        string.format("add_text_input|hv_edit_f_item|ID Item Harvest|%d|8|", entry.item_id or HV.CFG.default_item_id),
+        string.format("add_checkbox|hv_edit_f_done|Sudah Selesai (DONE)|%d|", (entry.status == "Done") and 1 or 0),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_button|hv_btn_save_f_edit_%d|`wSave Changes `2(Save)|noflags|0|0|", idx),
+        string.format("add_button|hv_btn_del_f_edit_%d|`wDelete World `4(Del)|noflags|0|0|", idx),
+        "add_button|hv_btn_back_f_list|`wBack|noflags|0|0|",
+        string.format("end_dialog|hv_edit_farm_%d|Cancel||", idx)
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 1.5 File & Backup Manager Farm
+DLG.showHarvestFileFarmDialog = function()
+    local fName = "boren_harvest_farms.txt"
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wBackup & File Manager Farm``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wSimpan atau muat daftar world farm dari file storage lokal:|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_text_input|hv_in_file_farm|Nama File|%s|40|", fName),
+        "add_spacer|small|",
+        "add_button|hv_btn_do_save_f_file|`wSave Queue ke File `2(Save)|noflags|0|0|",
+        "add_button|hv_btn_do_load_f_file|`wLoad Queue dari File `2(Load)|noflags|0|0|",
+        "add_button|hv_btn_back_farms|`wBack|noflags|0|0|",
+        "end_dialog|hv_file_farm|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- 2. SETTING STORAGE MULTI-WORLD (HUB + SUB-DIALOGS)
+-- ============================================================================
+DLG.showHarvestStorageDialog = function()
+    local sCount = #(HV.STATE.save_rows or {})
+    local defLimit = tonumber(HV.CFG.default_save_limit) or 20000
+    local dropThresh = tonumber(HV.CFG.drop_threshold) or 200
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wSetting Storage Multi-World``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wTotal Save: `2(%d World) `p- `wDefault Limit: `2(%d)|left|", sCount, defLimit),
+        string.format("add_textbox|`wDrop Threshold di Tas: `b%d Item|left|", dropThresh),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_button|hv_btn_open_add_save|`w1. Add Save World `2(Manual)|noflags|0|0|",
+        "add_button|hv_btn_open_batch_save|`w2. Batch Add Save World `2(Paste)|noflags|0|0|",
+        string.format("add_button|hv_btn_open_list_save|`w3. List Save Worlds `2(%d World)|noflags|0|0|", sCount),
+        "add_button|hv_btn_open_limit_cfg|`w4. Custom Limit & Threshold Drop|noflags|0|0|",
+        "add_button|hv_btn_open_file_save|`w5. Backup & File Manager|noflags|0|0|",
+        "add_button|hv_btn_dlg_reset_save_st|`wReset Status Storage `4(Semua Ready)|noflags|0|0|",
+        "add_button|hv_btn_dlg_clear_saves|`wClear All Save Worlds `4(Delete All)|noflags|0|0|",
+        "add_spacer|small|",
+        "add_button|hv_btn_dlg_back_main|`wBack|noflags|0|0|",
+        "end_dialog|hv_storage|Close||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.1 Add Single Save World
+DLG.showHarvestAddSaveDialog = function()
+    local curW = getCurrentWorldSafe()
+    if curW == "" then curW = "EXIT" end
+    local defLimit = tonumber(HV.CFG.default_save_limit) or 20000
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wAdd Save World``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wMasukkan data world gudang penyimpanan hasil panen:|left|",
+        "add_textbox|`p(Tipe: ALL = Block + Seed, BLOCK = Hanya Block, SEED = Hanya Seed)|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_text_input|hv_in_save_name|World Name||32|",
+        "add_text_input|hv_in_save_door|Door ID (Opsional)||16|",
+        "add_text_input|hv_in_save_type|Tipe Simpan (ALL/BLOCK/SEED)|ALL|8|",
+        string.format("add_text_input|hv_in_save_limit|Max Limit Item (0 = Unlimited)|%d|10|", defLimit),
+        "add_spacer|small|",
+        "add_button|hv_btn_do_add_save|`wSave World `2(Add)|noflags|0|0|",
+        string.format("add_button|hv_btn_add_cur_save_sub|`wAdd Current World `2(%s)|noflags|0|0|", curW),
+        "add_button|hv_btn_back_storage|`wBack|noflags|0|0|",
+        "end_dialog|hv_add_save|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.2 Batch Add Save Worlds
+DLG.showHarvestBatchSaveDialog = function()
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wBatch Add Save Worlds``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wMasukkan daftar save world dipisah spasi, koma atau enter:|left|",
+        "add_textbox|`p(Format: SAVE1:DOOR:ALL:20000 SAVE2:DOOR:BLOCK:50000)|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_text_input|hv_in_batch_saves|Save World List||80|",
+        "add_checkbox|hv_chk_batch_save_rep|Ganti seluruh daftar (Replace)|0|",
+        "add_spacer|small|",
+        "add_button|hv_btn_do_batch_save|`wAdd All Worlds `2(Batch)|noflags|0|0|",
+        "add_button|hv_btn_back_storage|`wBack|noflags|0|0|",
+        "end_dialog|hv_batch_save|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.3 List Save Worlds (Paginated 5 per page)
+DLG.showHarvestSaveListDialog = function(page)
+    local list = HV.STATE.save_rows or {}
+    local count = #list
+    local perPage = 5
+    local totalPages = math.max(1, math.ceil(count / perPage))
+    page = math.max(1, math.min(totalPages, tonumber(page) or 1))
+    DLG.save_page = page
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wList Save Worlds``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wTotal Registered: `2(%d World) `p- `wPage `2(%d/%d)|left|", count, page, totalPages),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+    }
+
+    if count == 0 then
+        lines[#lines+1] = "add_textbox|`4(Daftar Save World masih kosong. Silakan tambah gudang)|left|"
+    else
+        local startIdx = (page - 1) * perPage + 1
+        local endIdx = math.min(count, startIdx + perPage - 1)
+        for i = startIdx, endIdx do
+            local item = list[i]
+            local dName = (item.door and item.door ~= "") and item.door or "-"
+            local limTxt = (tonumber(item.limit) and tonumber(item.limit) > 0) and tostring(item.limit) or "Unlim"
+            local cntTxt = tostring(item.count or 0)
+            local st = (item.status == "Full") and "`4[FULL]" or "`2[" .. tostring(item.status or "Ready") .. "]"
+            lines[#lines+1] = string.format("add_textbox|`w#%d `b%s `p[Door: `e%s`p] `o[%s] `2(%s/%s) %s|left|", i, item.name, dName, item.save_type or "ALL", cntTxt, limTxt, st)
+            lines[#lines+1] = string.format("add_button|hv_btn_s_edit_%d|`wEdit `2(#%d)|noflags|0|0|", i, i)
+            lines[#lines+1] = string.format("add_button|hv_btn_s_del_%d|`wDelete `4(#%d)|noflags|0|0|", i, i)
+            lines[#lines+1] = "add_spacer|small|"
+        end
+    end
+
+    lines[#lines+1] = "add_spacer|small|"
+    if page > 1 then
+        lines[#lines+1] = string.format("add_button|hv_btn_s_prev_%d|`w<< Prev Page `2(%d)|noflags|0|0|", page - 1, page - 1)
+    end
+    if page < totalPages then
+        lines[#lines+1] = string.format("add_button|hv_btn_s_next_%d|`wNext Page >> `2(%d)|noflags|0|0|", page + 1, page + 1)
+    end
+    lines[#lines+1] = "add_button|hv_btn_dlg_clear_saves|`wClear All Save Worlds `4(Delete All)|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_back_storage|`wBack|noflags|0|0|"
+    lines[#lines+1] = "end_dialog|hv_list_save|Close||"
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.4 Edit Save World Entry
+DLG.showHarvestSaveEditDialog = function(idx)
+    idx = tonumber(idx) or 1
+    local entry = (HV.STATE.save_rows or {})[idx]
+    if not entry then return DLG.showHarvestSaveListDialog(1) end
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        string.format("add_label_with_icon|big|`wEdit Save World #%d: %s``|left|3802|", idx, entry.name),
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_text_input|hv_edit_s_name|World Name|%s|32|", entry.name or ""),
+        string.format("add_text_input|hv_edit_s_door|Door ID (Opsional)|%s|16|", entry.door or ""),
+        string.format("add_text_input|hv_edit_s_type|Tipe Simpan (ALL/BLOCK/SEED)|%s|8|", entry.save_type or "ALL"),
+        string.format("add_text_input|hv_edit_s_limit|Max Limit Item (0 = Unlimited)|%d|10|", tonumber(entry.limit) or 20000),
+        string.format("add_checkbox|hv_edit_s_full|Status Penuh (FULL)|%d|", (entry.status == "Full") and 1 or 0),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_button|hv_btn_save_s_edit_%d|`wSave Changes `2(Save)|noflags|0|0|", idx),
+        string.format("add_button|hv_btn_del_s_edit_%d|`wDelete World `4(Del)|noflags|0|0|", idx),
+        "add_button|hv_btn_back_s_list|`wBack|noflags|0|0|",
+        string.format("end_dialog|hv_edit_save_%d|Cancel||", idx)
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.5 Custom Limit & Threshold Drop
+DLG.showHarvestLimitConfigDialog = function()
+    local dropThresh = tonumber(HV.CFG.drop_threshold) or 200
+    local defLimit = tonumber(HV.CFG.default_save_limit) or 20000
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wCustom Limit & Drop Threshold``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wAtur batas kapasitas drop per world & batas isi tas:|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_text_input|hv_in_drop_threshold|Drop Threshold di Tas (Default 200)|%d|6|", dropThresh),
+        string.format("add_text_input|hv_in_default_save_limit|Default Limit per Save World|%d|10|", defLimit),
+        "add_spacer|small|",
+        "add_button|hv_btn_preset_10k|`wPreset Limit: 10.000 `2(10k)|noflags|0|0|",
+        "add_button|hv_btn_preset_20k|`wPreset Limit: 20.000 `2(20k)|noflags|0|0|",
+        "add_button|hv_btn_preset_50k|`wPreset Limit: 50.000 `2(50k)|noflags|0|0|",
+        "add_button|hv_btn_preset_unlimited|`wPreset Limit: Unlimited `2(Tanpa Batas)|noflags|0|0|",
+        "add_spacer|small|",
+        "add_button|hv_btn_save_limit_cfg|`wSave Config `2(Save)|noflags|0|0|",
+        "add_button|hv_btn_back_storage|`wBack|noflags|0|0|",
+        "end_dialog|hv_limit_cfg|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- 2.6 Backup & File Manager Storage
+DLG.showHarvestFileSaveDialog = function()
+    local fName = "boren_harvest_storages.txt"
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wBackup & File Manager Storage``|left|3802|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wSimpan atau muat daftar save world dari file storage lokal:|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_text_input|hv_in_file_save|Nama File|%s|40|", fName),
+        "add_spacer|small|",
+        "add_button|hv_btn_do_save_s_file|`wSave Queue ke File `2(Save)|noflags|0|0|",
+        "add_button|hv_btn_do_load_s_file|`wLoad Queue dari File `2(Load)|noflags|0|0|",
+        "add_button|hv_btn_back_storage|`wBack|noflags|0|0|",
+        "end_dialog|hv_file_save|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- 3. SETTING COLLECT, IGNORE & FLOATING
+-- ============================================================================
+DLG.showHarvestCollectDialog = function()
+    local c = HV.CFG
+    local ignGems = (c.ignore_gems ~= false) and 1 or 0
+    local autoCol = (c.auto_collect ~= false) and 1 or 0
+    local tkBlock = (c.take_block ~= false) and 1 or 0
+    local tkSeed = (c.take_seed ~= false) and 1 or 0
+    local tkFloat = (c.take_floating == true) and 1 or 0
+    local ignDrop = (c.ignore_take_drop ~= false) and 1 or 0
+    local cRange = tonumber(c.collect_range) or 4
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wSetting Collect, Ignore & Floating``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wKonfigurasi ignore gems, auto collect & anti retake saat drop:|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_checkbox|hv_chk_ignore_gems|Abaikan Gems ID 112 (Anti Tas Penuh Gems)|%d|", ignGems),
+        string.format("add_checkbox|hv_chk_auto_collect|Auto Collect Hasil Harvest (Block & Seed)|%d|", autoCol),
+        string.format("add_checkbox|hv_chk_take_block|Ambil Block Hasil Harvest|%d|", tkBlock),
+        string.format("add_checkbox|hv_chk_take_seed|Ambil Seed Hasil Harvest|%d|", tkSeed),
+        string.format("add_checkbox|hv_chk_take_floating|Take Floating Block & Seed di Farm World|%d|", tkFloat),
+        string.format("add_checkbox|hv_chk_ignore_take_drop|Ignore Take saat Drop di Save World (Anti Retake)|%d|", ignDrop),
+        string.format("add_text_input|hv_in_collect_range|Radius Collect di Sekitar Bot (1-6)|%d|4|", cRange),
+        "add_spacer|small|",
+        "add_button|hv_btn_save_collect_cfg|`wSave Collect Settings `2(Save)|noflags|0|0|",
+        "add_button|hv_btn_dlg_back_main|`wBack|noflags|0|0|",
+        "end_dialog|hv_collect|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- 4. SETTING HARVEST ENGINE & CHEATS
+-- ============================================================================
+DLG.showHarvestSettingsDialog = function()
+    local c = HV.CFG
+    local isTele = (c.harvest_mode == "teleport") and 1 or 0
+    local is3Z = (c.harvest_mode == "3zigzag") and 1 or 0
+    local mFly = (c.use_modfly == true) and 1 or 0
+    local loopEn = (c.loop_enabled == true) and 1 or 0
+    local hDel = tonumber(c.harvest_delay) or 180
+    local sDel = tonumber(c.step_delay) or 110
+    local wDel = tonumber(c.warp_delay) or 4500
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wSetting Harvest Engine & Cheats``|left|32|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_textbox|`wKonfigurasi mode panen, kecepatan delay bot & cheat:|left|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        string.format("add_checkbox|hv_chk_mode_teleport|Mode Teleport Per-Tree (Cepat & Akurat)|%d|", isTele),
+        string.format("add_checkbox|hv_chk_mode_zigzag|Mode 3-Zigzag Serpentine|%d|", is3Z),
+        string.format("add_checkbox|hv_chk_modfly|Aktifkan Modfly (Terbang Tembus Rintangan)|%d|", mFly),
+        string.format("add_checkbox|hv_chk_loop|Loop Antrean Farm Terus Menerus|%d|", loopEn),
+        string.format("add_text_input|hv_in_harvest_delay|Delay Harvest / Punch (ms)|%d|6|", hDel),
+        string.format("add_text_input|hv_in_step_delay|Delay Langkah / Gerak (ms)|%d|6|", sDel),
+        string.format("add_text_input|hv_in_warp_delay|Delay Warp World (ms)|%d|6|", wDel),
+        "add_spacer|small|",
+        "add_button|hv_btn_save_settings_cfg|`wSave Settings `2(Save)|noflags|0|0|",
+        "add_button|hv_btn_dlg_back_main|`wBack|noflags|0|0|",
+        "end_dialog|hv_settings|Cancel||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- 5. LOG AKTIVITAS & TAS (COMPACT)
+-- ============================================================================
+DLG.showHarvestLogsDialog = function()
+    local logs = HV.STATE.logs or {}
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wLog Activity & Backpack``|left|32|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+    }
+    if #logs == 0 then
+        lines[#lines+1] = "add_textbox|`oBelum ada catatan aktivitas panen.|left|"
+    else
+        local startIdx = math.max(1, #logs - 6)
+        for i = startIdx, #logs do
+            local cleanLine = tostring(logs[i] or ""):gsub("[\r\n]+", " ")
+            if #cleanLine > 60 then cleanLine = cleanLine:sub(1, 57) .. "..." end
+            lines[#lines+1] = string.format("add_textbox|%s|left|", cleanLine)
+        end
+    end
+    lines[#lines+1] = "add_textbox|`p------------------------------------------------------------|left|"
+    lines[#lines+1] = "add_spacer|small|"
+    lines[#lines+1] = "add_button|hv_btn_dlg_clear_logs|`wBersihkan Log|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_open_bag_view|`wLihat Isi Tas / Backpack `2(Bag)|noflags|0|0|"
+    lines[#lines+1] = "add_button|hv_btn_dlg_back_main|`wBack|noflags|0|0|"
+    lines[#lines+1] = "end_dialog|hv_logs|Close||"
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+DLG.showHarvestBagDialog = function()
+    local curFarm = HV.STATE.rows[HV.STATE.selected_idx]
+    local bID, sID = normalizeHarvestPair((curFarm and curFarm.item_id) or HV.CFG.default_item_id)
+    local blockCount = getInvCount(bID)
+    local seedCount = getInvCount(sID)
+    local fuelCount = getInvCount(1746)
+    local gemsCount = getInvCount(112)
+    local dcsCount = getInvCount(6840)
+    local harvCount = getInvCount(1830) + getInvCount(1966)
+
+    local lines = {
+        "set_default_color|`o",
+        "add_quick_exit|",
+        "add_label_with_icon|big|`wIsi Tas / Backpack``|left|18|",
+        "add_spacer|small|",
+        "add_textbox|`p------------------------------------------------------------|left|",
+        string.format("add_textbox|`wBlock (#%d): `2%d item `p- `wSeed (#%d): `2%d item|left|", bID, blockCount, sID, seedCount),
+        string.format("add_textbox|`wFuel Pack (#1746): `2%d `p- `wGems (#112): `e%d|left|", fuelCount, gemsCount),
+        string.format("add_textbox|`wDCS (#6840): `2%d `p- `wHarvester: `2%d|left|", dcsCount, harvCount),
+        "add_textbox|`p------------------------------------------------------------|left|",
+        "add_spacer|small|",
+        "add_button|hv_btn_refresh_bag_dlg|`wRefresh Tas `2(Update)|noflags|0|0|",
+        "add_button|hv_btn_back_logs|`wBack|noflags|0|0|",
+        "end_dialog|hv_bag|Close||"
+    }
+    showClientDialog(table.concat(lines, "\n"))
+end
+
+-- ============================================================================
+-- COMPACT DIALOG PACKET RETURN HANDLER & PACKET HOOK
+-- ============================================================================
+local function handleHarvestDialogReturn(pkt)
+    if not pkt or type(pkt) ~= "string" then return false end
+    local fields = {}
+    for line in pkt:gmatch("[^\r\n]+") do
+        local k, v = line:match("^([^|]+)|(.*)$")
+        if k then
+            v = v:gsub("^%s+", ""):gsub("%s+$", "")
+            if v:sub(-1) == "|" then v = v:sub(1, -2) end
+            fields[k] = v
+        end
+    end
+    local dName = fields.dialog_name or pkt:match("dialog_name|([^|\r\n]+)") or ""
+    local btn = fields.buttonClicked or pkt:match("buttonClicked|([^|\r\n]+)") or ""
+
+    local function getVal(key)
+        local val = fields[key] or pkt:match(key .. "|([^|\r\n]+)") or ""
+        val = val:gsub("^%s+", ""):gsub("%s+$", "")
+        if val:sub(-1) == "|" then val = val:sub(1, -2) end
+        return val
+    end
+    local function getNum(key, default)
+        local val = getVal(key)
+        local n = tonumber(val:match("(%d+)"))
+        return n or default
+    end
+
+    -- --- A. MAIN DIALOG ---
+    if dName == "hv_main" or pkt:find("dialog_name|hv_main", 1, true) then
+        if btn == "hv_btn_dlg_start" or pkt:find("buttonClicked|hv_btn_dlg_start", 1, true) then
+            if not HV.STATE.running then HV.start() end
+            DLG.showHarvestMainDialog()
+            return true
+        elseif btn == "hv_btn_dlg_stop" or pkt:find("buttonClicked|hv_btn_dlg_stop", 1, true) then
+            HV.stop()
+            DLG.showHarvestMainDialog()
+            return true
+        elseif btn == "hv_btn_dlg_add_cur_farm" or pkt:find("buttonClicked|hv_btn_dlg_add_cur_farm", 1, true) then
+            local cw = getCurrentWorldSafe()
+            if cw and cw ~= "" and cw ~= "EXIT" then
+                local exists = false
+                for _, w in ipairs(HV.STATE.rows or {}) do
+                    if w.name == cw then exists = true; break end
+                end
+                if not exists then
+                    table.insert(HV.STATE.rows, { name = cw, door = "", item_id = HV.CFG.default_item_id, status = "Ready" })
+                    HV.saveData()
+                    notifyMsg("World " .. cw .. " ditambahkan ke Farm List!")
+                else
+                    notifyMsg(cw .. " sudah ada di Farm List!")
+                end
+            end
+            DLG.showHarvestMainDialog()
+            return true
+        elseif btn == "hv_btn_dlg_farms" or pkt:find("buttonClicked|hv_btn_dlg_farms", 1, true) then
+            DLG.showHarvestFarmDialog()
+            return true
+        elseif btn == "hv_btn_dlg_storage" or pkt:find("buttonClicked|hv_btn_dlg_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        elseif btn == "hv_btn_dlg_collect" or pkt:find("buttonClicked|hv_btn_dlg_collect", 1, true) then
+            DLG.showHarvestCollectDialog()
+            return true
+        elseif btn == "hv_btn_dlg_settings" or pkt:find("buttonClicked|hv_btn_dlg_settings", 1, true) then
+            DLG.showHarvestSettingsDialog()
+            return true
+        elseif btn == "hv_btn_dlg_logs" or pkt:find("buttonClicked|hv_btn_dlg_logs", 1, true) then
+            DLG.showHarvestLogsDialog()
+            return true
+        elseif btn == "hv_btn_dlg_close" or pkt:find("buttonClicked|hv_btn_dlg_close", 1, true) then
+            return true
+        end
+        return true
+
+    -- --- B. SETTING FARM MULTI-WORLD ---
+    elseif dName == "hv_farms" or pkt:find("dialog_name|hv_farms", 1, true) then
+        if btn == "hv_btn_open_add_farm" or pkt:find("buttonClicked|hv_btn_open_add_farm", 1, true) then
+            DLG.showHarvestAddFarmDialog()
+            return true
+        elseif btn == "hv_btn_open_batch_farm" or pkt:find("buttonClicked|hv_btn_open_batch_farm", 1, true) then
+            DLG.showHarvestBatchFarmDialog()
+            return true
+        elseif btn == "hv_btn_open_list_farm" or pkt:find("buttonClicked|hv_btn_open_list_farm", 1, true) then
+            DLG.showHarvestFarmListDialog(1)
+            return true
+        elseif btn == "hv_btn_open_file_farm" or pkt:find("buttonClicked|hv_btn_open_file_farm", 1, true) then
+            DLG.showHarvestFileFarmDialog()
+            return true
+        elseif btn == "hv_btn_dlg_reset_farm_st" or pkt:find("buttonClicked|hv_btn_dlg_reset_farm_st", 1, true) then
+            for _, r in ipairs(HV.STATE.rows or {}) do r.status = "Ready" end
+            HV.saveData()
+            notifyMsg("Status antrean farm di-reset ke Ready!")
+            DLG.showHarvestFarmDialog()
+            return true
+        elseif btn == "hv_btn_dlg_clear_farms" or pkt:find("buttonClicked|hv_btn_dlg_clear_farms", 1, true) then
+            HV.STATE.rows = {}
+            HV.saveData()
+            notifyMsg("Semua farm world di-clear!")
+            DLG.showHarvestFarmDialog()
+            return true
+        elseif btn == "hv_btn_dlg_back_main" or pkt:find("buttonClicked|hv_btn_dlg_back_main", 1, true) then
+            DLG.showHarvestMainDialog()
+            return true
+        end
+        return true
+
+    -- Add Single Farm
+    elseif dName == "hv_add_farm" or pkt:find("dialog_name|hv_add_farm", 1, true) then
+        if btn == "hv_btn_do_add_farm" or pkt:find("buttonClicked|hv_btn_do_add_farm", 1, true) then
+            local rawW = getVal("hv_in_farm_name"):upper():gsub("%s+", "")
+            local wDoor = getVal("hv_in_farm_door"):gsub("%s+", "")
+            local itm = getNum("hv_in_farm_item", HV.CFG.default_item_id)
+            local wName = rawW
+            if rawW:find(":") then
+                local parts = {}
+                for token in rawW:gmatch("[^:]+") do table.insert(parts, token) end
+                wName = parts[1] or ""
+                wDoor = parts[2] or wDoor
+                if parts[3] and tonumber(parts[3]) then itm = tonumber(parts[3]) end
+            end
+            if wName and wName ~= "" and wName ~= "0" and wName ~= "EXIT" then
+                local exists = false
+                for _, w in ipairs(HV.STATE.rows or {}) do
+                    if w.name == wName then exists = true; break end
+                end
+                if not exists then
+                    table.insert(HV.STATE.rows, { name = wName, door = wDoor or "", item_id = itm, status = "Ready" })
+                    HV.saveData()
+                    notifyMsg("Farm World " .. wName .. " ditambahkan!")
+                else
+                    notifyMsg(wName .. " sudah ada di antrean!")
+                end
+            end
+            DLG.showHarvestFarmDialog()
+            return true
+        elseif btn == "hv_btn_add_cur_farm_sub" or pkt:find("buttonClicked|hv_btn_add_cur_farm_sub", 1, true) then
+            local cw = getCurrentWorldSafe()
+            if cw and cw ~= "" and cw ~= "EXIT" then
+                local exists = false
+                for _, w in ipairs(HV.STATE.rows or {}) do
+                    if w.name == cw then exists = true; break end
+                end
+                if not exists then
+                    table.insert(HV.STATE.rows, { name = cw, door = "", item_id = HV.CFG.default_item_id, status = "Ready" })
+                    HV.saveData()
+                    notifyMsg("Farm World " .. cw .. " ditambahkan!")
+                else
+                    notifyMsg(cw .. " sudah ada di antrean!")
+                end
+            end
+            DLG.showHarvestAddFarmDialog()
+            return true
+        elseif btn == "hv_btn_back_farms" or pkt:find("buttonClicked|hv_btn_back_farms", 1, true) then
+            DLG.showHarvestFarmDialog()
+            return true
+        end
+        return true
+
+    -- Batch Add Farm
+    elseif dName == "hv_batch_farm" or pkt:find("dialog_name|hv_batch_farm", 1, true) then
+        if btn == "hv_btn_do_batch_farm" or pkt:find("buttonClicked|hv_btn_do_batch_farm", 1, true) then
+            local raw = getVal("hv_in_batch_farms")
+            local rep = (getVal("hv_chk_batch_farm_rep") == "1")
+            if rep then HV.STATE.rows = {} end
+            local added = 0
+            for token in raw:gmatch("[^\r\n,;%s]+") do
+                local p = parseFarmRow(token)
+                if p and p.name ~= "" and p.name ~= "EXIT" then
+                    local exists = false
+                    for _, w in ipairs(HV.STATE.rows or {}) do
+                        if w.name == p.name then exists = true; break end
+                    end
+                    if not exists then
+                        table.insert(HV.STATE.rows, p)
+                        added = added + 1
+                    end
+                end
+            end
+            HV.saveData()
+            notifyMsg(string.format("%d Farm World ditambahkan!", added))
+            DLG.showHarvestFarmDialog()
+            return true
+        elseif btn == "hv_btn_back_farms" or pkt:find("buttonClicked|hv_btn_back_farms", 1, true) then
+            DLG.showHarvestFarmDialog()
+            return true
+        end
+        return true
+
+    -- List Farm Worlds
+    elseif dName == "hv_list_farm" or pkt:find("dialog_name|hv_list_farm", 1, true) then
+        local prevP = btn:match("hv_btn_f_prev_(%d+)")
+        local nextP = btn:match("hv_btn_f_next_(%d+)")
+        local editIdx = btn:match("hv_btn_f_edit_(%d+)")
+        local delIdx = btn:match("hv_btn_f_del_(%d+)")
+
+        if prevP then
+            DLG.showHarvestFarmListDialog(tonumber(prevP))
+            return true
+        elseif nextP then
+            DLG.showHarvestFarmListDialog(tonumber(nextP))
+            return true
+        elseif editIdx then
+            DLG.showHarvestFarmEditDialog(tonumber(editIdx))
+            return true
+        elseif delIdx then
+            local idx = tonumber(delIdx)
+            if idx and HV.STATE.rows[idx] then
+                table.remove(HV.STATE.rows, idx)
+                HV.saveData()
+                notifyMsg("Farm World #" .. idx .. " dihapus!")
+            end
+            DLG.showHarvestFarmListDialog(DLG.farm_page or 1)
+            return true
+        elseif btn == "hv_btn_dlg_clear_farms" or pkt:find("buttonClicked|hv_btn_dlg_clear_farms", 1, true) then
+            HV.STATE.rows = {}
+            HV.saveData()
+            notifyMsg("Semua farm world di-clear!")
+            DLG.showHarvestFarmListDialog(1)
+            return true
+        elseif btn == "hv_btn_back_farms" or pkt:find("buttonClicked|hv_btn_back_farms", 1, true) then
+            DLG.showHarvestFarmDialog()
+            return true
+        end
+        return true
+
+    -- Edit Farm World
+    elseif dName:find("^hv_edit_farm_(%d+)$") or pkt:find("dialog_name|hv_edit_farm_", 1, true) then
+        local idx = tonumber(dName:match("^hv_edit_farm_(%d+)") or pkt:match("dialog_name|hv_edit_farm_(%d+)"))
+        if not idx then
+            idx = tonumber(btn:match("hv_btn_save_f_edit_(%d+)") or btn:match("hv_btn_del_f_edit_(%d+)"))
+        end
+        if idx and HV.STATE.rows[idx] then
+            if btn:find("hv_btn_save_f_edit_") or pkt:find("buttonClicked|hv_btn_save_f_edit_", 1, true) then
+                local newName = getVal("hv_edit_f_name"):upper():gsub("%s+", "")
+                local newDoor = getVal("hv_edit_f_door"):gsub("%s+", "")
+                local newItm = getNum("hv_edit_f_item", HV.CFG.default_item_id)
+                local newDone = (getVal("hv_edit_f_done") == "1")
+                if newName ~= "" and newName ~= "0" and newName ~= "EXIT" then
+                    HV.STATE.rows[idx].name = newName
+                    HV.STATE.rows[idx].door = newDoor
+                    HV.STATE.rows[idx].item_id = newItm
+                    HV.STATE.rows[idx].status = newDone and "Done" or "Ready"
+                    HV.saveData()
+                    notifyMsg("Farm #" .. idx .. " diupdate!")
+                end
+                DLG.showHarvestFarmListDialog(DLG.farm_page or 1)
+                return true
+            elseif btn:find("hv_btn_del_f_edit_") or pkt:find("buttonClicked|hv_btn_del_f_edit_", 1, true) then
+                table.remove(HV.STATE.rows, idx)
+                HV.saveData()
+                notifyMsg("Farm #" .. idx .. " dihapus!")
+                DLG.showHarvestFarmListDialog(DLG.farm_page or 1)
+                return true
+            end
+        end
+        if btn == "hv_btn_back_f_list" or pkt:find("buttonClicked|hv_btn_back_f_list", 1, true) then
+            DLG.showHarvestFarmListDialog(DLG.farm_page or 1)
+            return true
+        end
+        return true
+
+    -- File Farm
+    elseif dName == "hv_file_farm" or pkt:find("dialog_name|hv_file_farm", 1, true) then
+        local fn = getVal("hv_in_file_farm")
+        if fn == "" then fn = "boren_harvest_farms.txt" end
+        if btn == "hv_btn_do_save_f_file" or pkt:find("buttonClicked|hv_btn_do_save_f_file", 1, true) then
+            local lines = {}
+            for _, r in ipairs(HV.STATE.rows or {}) do
+                table.insert(lines, string.format("%s:%s:%d", r.name, r.door or "", r.item_id or HV.CFG.default_item_id))
+            end
+            local okW = safeWriteFile(fn, table.concat(lines, "\n"))
+            if okW then notifyMsg(string.format("Antrean disimpan ke %s (%d world)", fn, #lines))
+            else notifyMsg("Gagal menyimpan ke " .. fn) end
+            DLG.showHarvestFileFarmDialog()
+            return true
+        elseif btn == "hv_btn_do_load_f_file" or pkt:find("buttonClicked|hv_btn_do_load_f_file", 1, true) then
+            local content = safeReadFile(fn)
+            if content and content ~= "" then
+                local added = 0
+                for token in content:gmatch("[^\r\n,;%s]+") do
+                    local p = parseFarmRow(token)
+                    if p and p.name ~= "" and p.name ~= "EXIT" then
+                        table.insert(HV.STATE.rows, p)
+                        added = added + 1
+                    end
+                end
+                HV.saveData()
+                notifyMsg(string.format("%d Farm dimuat dari %s!", added, fn))
+            else
+                notifyMsg("Gagal membaca file: " .. fn)
+            end
+            DLG.showHarvestFileFarmDialog()
+            return true
+        elseif btn == "hv_btn_back_farms" or pkt:find("buttonClicked|hv_btn_back_farms", 1, true) then
+            DLG.showHarvestFarmDialog()
+            return true
+        end
+        return true
+
+    -- --- C. SETTING STORAGE MULTI-WORLD ---
+    elseif dName == "hv_storage" or pkt:find("dialog_name|hv_storage", 1, true) then
+        if btn == "hv_btn_open_add_save" or pkt:find("buttonClicked|hv_btn_open_add_save", 1, true) then
+            DLG.showHarvestAddSaveDialog()
+            return true
+        elseif btn == "hv_btn_open_batch_save" or pkt:find("buttonClicked|hv_btn_open_batch_save", 1, true) then
+            DLG.showHarvestBatchSaveDialog()
+            return true
+        elseif btn == "hv_btn_open_list_save" or pkt:find("buttonClicked|hv_btn_open_list_save", 1, true) then
+            DLG.showHarvestSaveListDialog(1)
+            return true
+        elseif btn == "hv_btn_open_limit_cfg" or pkt:find("buttonClicked|hv_btn_open_limit_cfg", 1, true) then
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_open_file_save" or pkt:find("buttonClicked|hv_btn_open_file_save", 1, true) then
+            DLG.showHarvestFileSaveDialog()
+            return true
+        elseif btn == "hv_btn_dlg_reset_save_st" or pkt:find("buttonClicked|hv_btn_dlg_reset_save_st", 1, true) then
+            for _, r in ipairs(HV.STATE.save_rows or {}) do r.status = "Ready"; r.count = 0 end
+            HV.saveData()
+            notifyMsg("Status semua save world di-reset ke Ready!")
+            DLG.showHarvestStorageDialog()
+            return true
+        elseif btn == "hv_btn_dlg_clear_saves" or pkt:find("buttonClicked|hv_btn_dlg_clear_saves", 1, true) then
+            HV.STATE.save_rows = {}
+            HV.saveData()
+            notifyMsg("Semua save world di-clear!")
+            DLG.showHarvestStorageDialog()
+            return true
+        elseif btn == "hv_btn_dlg_back_main" or pkt:find("buttonClicked|hv_btn_dlg_back_main", 1, true) then
+            DLG.showHarvestMainDialog()
+            return true
+        end
+        return true
+
+    -- Add Single Save World
+    elseif dName == "hv_add_save" or pkt:find("dialog_name|hv_add_save", 1, true) then
+        if btn == "hv_btn_do_add_save" or pkt:find("buttonClicked|hv_btn_do_add_save", 1, true) then
+            local rawW = getVal("hv_in_save_name"):upper():gsub("%s+", "")
+            local wDoor = getVal("hv_in_save_door"):gsub("%s+", "")
+            local sType = getVal("hv_in_save_type"):upper():gsub("%s+", "")
+            if sType ~= "BLOCK" and sType ~= "SEED" then sType = "ALL" end
+            local sLim = getNum("hv_in_save_limit", HV.CFG.default_save_limit)
+            local wName = rawW
+            if rawW:find(":") then
+                local parts = {}
+                for token in rawW:gmatch("[^:]+") do table.insert(parts, token) end
+                wName = parts[1] or ""
+                wDoor = parts[2] or wDoor
+                if parts[3] then sType = parts[3]:upper() end
+                if parts[4] and tonumber(parts[4]) then sLim = tonumber(parts[4]) end
+            end
+            if wName and wName ~= "" and wName ~= "0" and wName ~= "EXIT" then
+                local exists = false
+                for _, w in ipairs(HV.STATE.save_rows or {}) do
+                    if w.name == wName then exists = true; break end
+                end
+                if not exists then
+                    table.insert(HV.STATE.save_rows, { name = wName, door = wDoor or "", save_type = sType, limit = sLim, count = 0, status = "Ready" })
+                    HV.saveData()
+                    notifyMsg("Save World " .. wName .. " ditambahkan!")
+                else
+                    notifyMsg(wName .. " sudah ada di Save World!")
+                end
+            end
+            DLG.showHarvestStorageDialog()
+            return true
+        elseif btn == "hv_btn_add_cur_save_sub" or pkt:find("buttonClicked|hv_btn_add_cur_save_sub", 1, true) then
+            local cw = getCurrentWorldSafe()
+            if cw and cw ~= "" and cw ~= "EXIT" then
+                local exists = false
+                for _, w in ipairs(HV.STATE.save_rows or {}) do
+                    if w.name == cw then exists = true; break end
+                end
+                if not exists then
+                    table.insert(HV.STATE.save_rows, { name = cw, door = "", save_type = "ALL", limit = HV.CFG.default_save_limit, count = 0, status = "Ready" })
+                    HV.saveData()
+                    notifyMsg("Save World " .. cw .. " ditambahkan!")
+                else
+                    notifyMsg(cw .. " sudah ada di Save World!")
+                end
+            end
+            DLG.showHarvestAddSaveDialog()
+            return true
+        elseif btn == "hv_btn_back_storage" or pkt:find("buttonClicked|hv_btn_back_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        end
+        return true
+
+    -- Batch Add Save Worlds
+    elseif dName == "hv_batch_save" or pkt:find("dialog_name|hv_batch_save", 1, true) then
+        if btn == "hv_btn_do_batch_save" or pkt:find("buttonClicked|hv_btn_do_batch_save", 1, true) then
+            local raw = getVal("hv_in_batch_saves")
+            local rep = (getVal("hv_chk_batch_save_rep") == "1")
+            if rep then HV.STATE.save_rows = {} end
+            local added = 0
+            for token in raw:gmatch("[^\r\n,;%s]+") do
+                local p = parseSaveRow(token)
+                if p and p.name ~= "" and p.name ~= "EXIT" then
+                    local exists = false
+                    for _, w in ipairs(HV.STATE.save_rows or {}) do
+                        if w.name == p.name then exists = true; break end
+                    end
+                    if not exists then
+                        table.insert(HV.STATE.save_rows, p)
+                        added = added + 1
+                    end
+                end
+            end
+            HV.saveData()
+            notifyMsg(string.format("%d Save World ditambahkan!", added))
+            DLG.showHarvestStorageDialog()
+            return true
+        elseif btn == "hv_btn_back_storage" or pkt:find("buttonClicked|hv_btn_back_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        end
+        return true
+
+    -- List Save Worlds
+    elseif dName == "hv_list_save" or pkt:find("dialog_name|hv_list_save", 1, true) then
+        local prevP = btn:match("hv_btn_s_prev_(%d+)")
+        local nextP = btn:match("hv_btn_s_next_(%d+)")
+        local editIdx = btn:match("hv_btn_s_edit_(%d+)")
+        local delIdx = btn:match("hv_btn_s_del_(%d+)")
+
+        if prevP then
+            DLG.showHarvestSaveListDialog(tonumber(prevP))
+            return true
+        elseif nextP then
+            DLG.showHarvestSaveListDialog(tonumber(nextP))
+            return true
+        elseif editIdx then
+            DLG.showHarvestSaveEditDialog(tonumber(editIdx))
+            return true
+        elseif delIdx then
+            local idx = tonumber(delIdx)
+            if idx and HV.STATE.save_rows[idx] then
+                table.remove(HV.STATE.save_rows, idx)
+                HV.saveData()
+                notifyMsg("Save World #" .. idx .. " dihapus!")
+            end
+            DLG.showHarvestSaveListDialog(DLG.save_page or 1)
+            return true
+        elseif btn == "hv_btn_dlg_clear_saves" or pkt:find("buttonClicked|hv_btn_dlg_clear_saves", 1, true) then
+            HV.STATE.save_rows = {}
+            HV.saveData()
+            notifyMsg("Semua save world di-clear!")
+            DLG.showHarvestSaveListDialog(1)
+            return true
+        elseif btn == "hv_btn_back_storage" or pkt:find("buttonClicked|hv_btn_back_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        end
+        return true
+
+    -- Edit Save World Entry
+    elseif dName:find("^hv_edit_save_(%d+)$") or pkt:find("dialog_name|hv_edit_save_", 1, true) then
+        local idx = tonumber(dName:match("^hv_edit_save_(%d+)") or pkt:match("dialog_name|hv_edit_save_(%d+)"))
+        if not idx then
+            idx = tonumber(btn:match("hv_btn_save_s_edit_(%d+)") or btn:match("hv_btn_del_s_edit_(%d+)"))
+        end
+        if idx and HV.STATE.save_rows[idx] then
+            if btn:find("hv_btn_save_s_edit_") or pkt:find("buttonClicked|hv_btn_save_s_edit_", 1, true) then
+                local newName = getVal("hv_edit_s_name"):upper():gsub("%s+", "")
+                local newDoor = getVal("hv_edit_s_door"):gsub("%s+", "")
+                local newType = getVal("hv_edit_s_type"):upper():gsub("%s+", "")
+                if newType ~= "BLOCK" and newType ~= "SEED" then newType = "ALL" end
+                local newLim = getNum("hv_edit_s_limit", HV.CFG.default_save_limit)
+                local newFull = (getVal("hv_edit_s_full") == "1")
+                if newName ~= "" and newName ~= "0" and newName ~= "EXIT" then
+                    HV.STATE.save_rows[idx].name = newName
+                    HV.STATE.save_rows[idx].door = newDoor
+                    HV.STATE.save_rows[idx].save_type = newType
+                    HV.STATE.save_rows[idx].limit = newLim
+                    HV.STATE.save_rows[idx].status = newFull and "Full" or "Ready"
+                    HV.saveData()
+                    notifyMsg("Save World #" .. idx .. " diupdate!")
+                end
+                DLG.showHarvestSaveListDialog(DLG.save_page or 1)
+                return true
+            elseif btn:find("hv_btn_del_s_edit_") or pkt:find("buttonClicked|hv_btn_del_s_edit_", 1, true) then
+                table.remove(HV.STATE.save_rows, idx)
+                HV.saveData()
+                notifyMsg("Save World #" .. idx .. " dihapus!")
+                DLG.showHarvestSaveListDialog(DLG.save_page or 1)
+                return true
+            end
+        end
+        if btn == "hv_btn_back_s_list" or pkt:find("buttonClicked|hv_btn_back_s_list", 1, true) then
+            DLG.showHarvestSaveListDialog(DLG.save_page or 1)
+            return true
+        end
+        return true
+
+    -- Limit & Drop Threshold Dialog
+    elseif dName == "hv_limit_cfg" or pkt:find("dialog_name|hv_limit_cfg", 1, true) then
+        if btn == "hv_btn_preset_10k" or pkt:find("buttonClicked|hv_btn_preset_10k", 1, true) then
+            HV.CFG.default_save_limit = 10000
+            HV.saveData()
+            notifyMsg("Default Save Limit diatur ke 10.000!")
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_preset_20k" or pkt:find("buttonClicked|hv_btn_preset_20k", 1, true) then
+            HV.CFG.default_save_limit = 20000
+            HV.saveData()
+            notifyMsg("Default Save Limit diatur ke 20.000!")
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_preset_50k" or pkt:find("buttonClicked|hv_btn_preset_50k", 1, true) then
+            HV.CFG.default_save_limit = 50000
+            HV.saveData()
+            notifyMsg("Default Save Limit diatur ke 50.000!")
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_preset_unlimited" or pkt:find("buttonClicked|hv_btn_preset_unlimited", 1, true) then
+            HV.CFG.default_save_limit = 0
+            HV.saveData()
+            notifyMsg("Default Save Limit diatur ke Unlimited (0)!")
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_save_limit_cfg" or pkt:find("buttonClicked|hv_btn_save_limit_cfg", 1, true) then
+            local dt = getNum("hv_in_drop_threshold", 200)
+            if dt and dt >= 10 then HV.CFG.drop_threshold = dt end
+            local dlim = getNum("hv_in_default_save_limit", 20000)
+            if dlim and dlim >= 0 then HV.CFG.default_save_limit = dlim end
+            HV.saveData()
+            notifyMsg("Pengaturan Limit & Drop Threshold disimpan!")
+            DLG.showHarvestLimitConfigDialog()
+            return true
+        elseif btn == "hv_btn_back_storage" or pkt:find("buttonClicked|hv_btn_back_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        end
+        return true
+
+    -- File Save
+    elseif dName == "hv_file_save" or pkt:find("dialog_name|hv_file_save", 1, true) then
+        local fn = getVal("hv_in_file_save")
+        if fn == "" then fn = "boren_harvest_storages.txt" end
+        if btn == "hv_btn_do_save_s_file" or pkt:find("buttonClicked|hv_btn_do_save_s_file", 1, true) then
+            local lines = {}
+            for _, r in ipairs(HV.STATE.save_rows or {}) do
+                table.insert(lines, string.format("%s:%s:%s:%d", r.name, r.door or "", r.save_type or "ALL", tonumber(r.limit) or 20000))
+            end
+            local okW = safeWriteFile(fn, table.concat(lines, "\n"))
+            if okW then notifyMsg(string.format("Daftar Save disimpan ke %s (%d world)", fn, #lines))
+            else notifyMsg("Gagal menyimpan ke " .. fn) end
+            DLG.showHarvestFileSaveDialog()
+            return true
+        elseif btn == "hv_btn_do_load_s_file" or pkt:find("buttonClicked|hv_btn_do_load_s_file", 1, true) then
+            local content = safeReadFile(fn)
+            if content and content ~= "" then
+                local added = 0
+                for token in content:gmatch("[^\r\n,;%s]+") do
+                    local p = parseSaveRow(token)
+                    if p and p.name ~= "" and p.name ~= "EXIT" then
+                        table.insert(HV.STATE.save_rows, p)
+                        added = added + 1
+                    end
+                end
+                HV.saveData()
+                notifyMsg(string.format("%d Save World dimuat dari %s!", added, fn))
+            else
+                notifyMsg("Gagal membaca file: " .. fn)
+            end
+            DLG.showHarvestFileSaveDialog()
+            return true
+        elseif btn == "hv_btn_back_storage" or pkt:find("buttonClicked|hv_btn_back_storage", 1, true) then
+            DLG.showHarvestStorageDialog()
+            return true
+        end
+        return true
+
+    -- --- D. SETTING COLLECT, IGNORE & FLOATING ---
+    elseif dName == "hv_collect" or pkt:find("dialog_name|hv_collect", 1, true) then
+        if btn == "hv_btn_save_collect_cfg" or pkt:find("buttonClicked|hv_btn_save_collect_cfg", 1, true) then
+            local igGems = getVal("hv_chk_ignore_gems")
+            if igGems ~= "" then HV.CFG.ignore_gems = (igGems:find("1") ~= nil) end
+            local autoCol = getVal("hv_chk_auto_collect")
+            if autoCol ~= "" then HV.CFG.auto_collect = (autoCol:find("1") ~= nil) end
+            local tkBlock = getVal("hv_chk_take_block")
+            if tkBlock ~= "" then HV.CFG.take_block = (tkBlock:find("1") ~= nil) end
+            local tkSeed = getVal("hv_chk_take_seed")
+            if tkSeed ~= "" then HV.CFG.take_seed = (tkSeed:find("1") ~= nil) end
+            local tkFloat = getVal("hv_chk_take_floating")
+            if tkFloat ~= "" then HV.CFG.take_floating = (tkFloat:find("1") ~= nil) end
+            local ignDrop = getVal("hv_chk_ignore_take_drop")
+            if ignDrop ~= "" then HV.CFG.ignore_take_drop = (ignDrop:find("1") ~= nil) end
+            local cRange = getNum("hv_in_collect_range", 4)
+            if cRange and cRange >= 1 and cRange <= 8 then HV.CFG.collect_range = cRange end
+            HV.saveData()
+            notifyMsg("Pengaturan Collect & Ignore disimpan!")
+            DLG.showHarvestCollectDialog()
+            return true
+        elseif btn == "hv_btn_dlg_back_main" or pkt:find("buttonClicked|hv_btn_dlg_back_main", 1, true) then
+            DLG.showHarvestMainDialog()
+            return true
+        end
+        return true
+
+    -- --- E. SETTING HARVEST ENGINE & CHEATS ---
+    elseif dName == "hv_settings" or pkt:find("dialog_name|hv_settings", 1, true) then
+        if btn == "hv_btn_save_settings_cfg" or pkt:find("buttonClicked|hv_btn_save_settings_cfg", 1, true) then
+            local isTele = getVal("hv_chk_mode_teleport")
+            local is3z = getVal("hv_chk_mode_zigzag")
+            if isTele ~= "" and isTele:find("1") then HV.CFG.harvest_mode = "teleport"
+            elseif is3z ~= "" and is3z:find("1") then HV.CFG.harvest_mode = "3zigzag" end
+            local mFly = getVal("hv_chk_modfly")
+            if mFly ~= "" then HV.CFG.use_modfly = (mFly:find("1") ~= nil) end
+            local lEn = getVal("hv_chk_loop")
+            if lEn ~= "" then HV.CFG.loop_enabled = (lEn:find("1") ~= nil) end
+            local hDel = getNum("hv_in_harvest_delay", 180)
+            if hDel and hDel >= 60 then HV.CFG.harvest_delay = hDel end
+            local sDel = getNum("hv_in_step_delay", 110)
+            if sDel and sDel >= 40 then HV.CFG.step_delay = sDel end
+            local wDel = getNum("hv_in_warp_delay", 4500)
+            if wDel and wDel >= 2000 then HV.CFG.warp_delay = wDel end
+            HV.saveData()
+            notifyMsg("Pengaturan Engine & Delays disimpan!")
+            DLG.showHarvestSettingsDialog()
+            return true
+        elseif btn == "hv_btn_dlg_back_main" or pkt:find("buttonClicked|hv_btn_dlg_back_main", 1, true) then
+            DLG.showHarvestMainDialog()
+            return true
+        end
+        return true
+
+    -- --- F. LOGS & BAG ---
+    elseif dName == "hv_logs" or pkt:find("dialog_name|hv_logs", 1, true) then
+        if btn == "hv_btn_dlg_clear_logs" or pkt:find("buttonClicked|hv_btn_dlg_clear_logs", 1, true) then
+            HV.STATE.logs = {}
+            notifyMsg("Log aktivitas dibersihkan!")
+            DLG.showHarvestLogsDialog()
+            return true
+        elseif btn == "hv_btn_open_bag_view" or pkt:find("buttonClicked|hv_btn_open_bag_view", 1, true) then
+            DLG.showHarvestBagDialog()
+            return true
+        elseif btn == "hv_btn_dlg_back_main" or pkt:find("buttonClicked|hv_btn_dlg_back_main", 1, true) then
+            DLG.showHarvestMainDialog()
+            return true
+        end
+        return true
+
+    elseif dName == "hv_bag" or pkt:find("dialog_name|hv_bag", 1, true) then
+        if btn == "hv_btn_refresh_bag_dlg" or pkt:find("buttonClicked|hv_btn_refresh_bag_dlg", 1, true) then
+            DLG.showHarvestBagDialog()
+            return true
+        elseif btn == "hv_btn_back_logs" or pkt:find("buttonClicked|hv_btn_back_logs", 1, true) then
+            DLG.showHarvestLogsDialog()
+            return true
+        end
+        return true
+    end
+
+    return false
+end
+
+_G.handleHarvestDialogReturn = handleHarvestDialogReturn
+
+-- Enhanced onSendPacket Hook to intercept Chat commands and Dialog Returns
+local orig_onSendPacketHook = onSendPacketHook
+local function onSendPacketEnhancedHook(p1, p2)
+    local pStr = nil
+    if type(p2) == "string" then pStr = p2
+    elseif type(p1) == "string" then pStr = p1 end
+
+    if pStr and type(pStr) == "string" then
+        local lowerP = pStr:lower()
+        -- Intersepsi Chat Commands (/hv, /harvest, /autoharvest, /boren, /menu)
+        if lowerP:find("/hv", 1, true) or lowerP:find("/harvest", 1, true) or lowerP:find("/autoharvest", 1, true) or lowerP:find("/boren", 1, true) or lowerP:find("/menu", 1, true) then
+            if lowerP:find("action|input", 1, true) or lowerP:find("text|/", 1, true) or lowerP:find("action|chat", 1, true) or lowerP:sub(1, 1) == "/" then
+                local cmd = lowerP:match("|text|(/[a-z0-9_]+)") or lowerP:match("text|(/[a-z0-9_]+)") or lowerP:match("(/[a-z0-9_]+)")
+                if cmd == "/hv" or cmd == "/harvest" or cmd == "/autoharvest" or cmd == "/boren" or cmd == "/menu" then
+                    local openFn = _G.showHarvestMainDialog or (DLG and DLG.showHarvestMainDialog)
+                    if openFn then
+                        pcall(openFn)
+                        if LogToConsole then pcall(LogToConsole, "`2[BOREN HARVEST] `wMenu Dialog dibuka via chat: `e" .. tostring(cmd)) end
+                    end
+                    return true
+                end
+            end
+        end
+
+        -- Intersepsi Dialog Return Compact Harvest
+        if pStr:find("action|dialog_return", 1, true) then
+            local handler = _G.handleHarvestDialogReturn or handleHarvestDialogReturn
+            if handler and handler(pStr) then
+                return true
+            end
+        end
+    end
+
+    if orig_onSendPacketHook then
+        return orig_onSendPacketHook(p1, p2)
+    end
+end
+
+onSendPacket = onSendPacketEnhancedHook
+OnSendPacket = onSendPacketEnhancedHook
+if addHook then
+    pcall(addHook, onSendPacketEnhancedHook, "onsendpacket")
+    pcall(addHook, "onSendPacket", "boren_hv_send_hook", onSendPacketEnhancedHook)
+    pcall(addHook, "OnSendPacket", "boren_hv_send_hook", onSendPacketEnhancedHook)
+    if applyHook then pcall(applyHook) end
+end
 -- 7. UI RENDERER (TERINTEGRASI DENGAN UI_KIT BOREN STORE HUB)
 -- ============================================================================
 local function uiKit()
@@ -3269,19 +4649,19 @@ local function registerNativeHarvestUI()
     -- TAB 1: START & FARM
     local uiFarm = createNativeUI("1. Start & Farm", "PlayArrow")
     uiFarm:addLabelApp("Boren Store - Auto Harvest v" .. HV.VERSION, "Storefront")
-    uiFarm:addButton("▶ START HARVEST BOT", "hv_btn_start")
-    uiFarm:addButton("■ STOP HARVEST BOT", "hv_btn_stop")
-    uiFarm:addToggleButton("▶ START / ■ STOP TOGGLE", HV.STATE.running, "hv_run_power")
+    uiFarm:addButton("    START HARVEST BOT", "hv_btn_start")
+    uiFarm:addButton("    STOP HARVEST BOT", "hv_btn_stop")
+    uiFarm:addToggleButton("    START /     STOP TOGGLE", HV.STATE.running, "hv_run_power")
     uiFarm:addToggle("Tampilkan Panel ImGui", HV.STATE.show_ui, "hv_show_ui", false)
     uiFarm:addDivider()
     uiFarm:addLabel("Tambah Antrean World Farm:")
     uiFarm:addInputString("Nama World Farm", HV.STATE.input_add_world, "World", "FARMWORLD", "Public", "hv_manual_world_input")
     uiFarm:addInputString("Door ID (Opsional)", HV.STATE.input_add_door, "Door ID", "Kosong = White Door", "DoorFront", "hv_manual_door_input")
     uiFarm:addInputInt("Block / Seed ID", tostring(HV.STATE.input_add_id or HV.CFG.default_item_id), "Item ID", "4584", "Category", "hv_manual_item_input")
-    uiFarm:addButton("➕ Tambah Farm ke Antrean", "hv_btn_add_farm")
-    uiFarm:addButton("📍 Tambah World Sekarang", "hv_btn_add_cur_farm")
-    uiFarm:addButton("🔄 Reset Status Antrean (Ready)", "hv_btn_reset_status")
-    uiFarm:addButton("🗑️ Kosongkan Antrean Farm", "hv_btn_clear_farms")
+    uiFarm:addButton("    Tambah Farm ke Antrean", "hv_btn_add_farm")
+    uiFarm:addButton("     Tambah World Sekarang", "hv_btn_add_cur_farm")
+    uiFarm:addButton("     Reset Status Antrean (Ready)", "hv_btn_reset_status")
+    uiFarm:addButton("        Kosongkan Antrean Farm", "hv_btn_clear_farms")
 
     -- TAB 2: SAVE & LIMIT
     local uiSave = createNativeUI("2. Save & Limit", "Archive")
@@ -3294,10 +4674,10 @@ local function registerNativeHarvestUI()
     uiSave:addButton("Tipe: ALL (Block + Seed)", "hv_btn_stype_all")
     uiSave:addButton("Tipe: BLOCK Saja", "hv_btn_stype_block")
     uiSave:addButton("Tipe: SEED Saja", "hv_btn_stype_seed")
-    uiSave:addButton("➕ Tambah World Save ke List", "hv_btn_add_save")
-    uiSave:addButton("📍 Tambah World Sekarang (Save)", "hv_btn_add_cur_save")
-    uiSave:addButton("🔄 Reset Penanda Penuh (Ready)", "hv_btn_reset_save_status")
-    uiSave:addButton("🗑️ Kosongkan List Save World", "hv_btn_clear_save")
+    uiSave:addButton("    Tambah World Save ke List", "hv_btn_add_save")
+    uiSave:addButton("     Tambah World Sekarang (Save)", "hv_btn_add_cur_save")
+    uiSave:addButton("     Reset Penanda Penuh (Ready)", "hv_btn_reset_save_status")
+    uiSave:addButton("        Kosongkan List Save World", "hv_btn_clear_save")
     uiSave:addDivider()
     uiSave:addLabel("Pengaturan Drop Tas (Default 200 Block):")
     uiSave:addSlider("Threshold Drop Tas", 50, 200, HV.CFG.drop_threshold or 200, 10, false, "hv_slider_drop_threshold")
@@ -3309,14 +4689,14 @@ local function registerNativeHarvestUI()
     uiEvent:addInputString("Nama World Event", HV.STATE.input_ev_w, "World", "WORLDEVENT1", "Event", "hv_input_ev_w")
     uiEvent:addInputString("Door ID (Opsional)", HV.STATE.input_ev_d, "Door ID", "Kosong = Door Utama", "DoorFront", "hv_input_ev_d")
     uiEvent:addInputInt("Limit Total Item Event (0 = Unli)", tostring(HV.STATE.input_ev_lim or HV.CFG.default_ev_limit), "Limit", "10000", "FormatListNumbered", "hv_input_ev_lim")
-    uiEvent:addButton("➕ Tambah World Event ke List", "hv_btn_add_ev")
-    uiEvent:addButton("📍 Tambah World Sekarang (Event)", "hv_btn_add_cur_ev")
-    uiEvent:addButton("🔄 Reset Penanda Event Penuh", "hv_btn_reset_ev_status")
-    uiEvent:addButton("🗑️ Kosongkan List Event World", "hv_btn_clear_ev")
+    uiEvent:addButton("    Tambah World Event ke List", "hv_btn_add_ev")
+    uiEvent:addButton("     Tambah World Sekarang (Event)", "hv_btn_add_cur_ev")
+    uiEvent:addButton("     Reset Penanda Event Penuh", "hv_btn_reset_ev_status")
+    uiEvent:addButton("        Kosongkan List Event World", "hv_btn_clear_ev")
     uiEvent:addDivider()
     uiEvent:addLabel("List ID Item Event (Selain Block & Seed):")
     uiEvent:addInputString("ID Item Event (Koma)", HV.CFG.event_ids_raw or "", "Event IDs", "1058,1094,1096,1098,1828", "Stars", "hv_input_event_ids")
-    uiEvent:addButton("🌕 Preset Mooncake (5 Jenis)", "hv_btn_preset_mooncake")
+    uiEvent:addButton("     Preset Mooncake (5 Jenis)", "hv_btn_preset_mooncake")
     uiEvent:addSlider("Threshold Drop Event", 20, 200, HV.CFG.event_threshold or 150, 10, false, "hv_slider_event_threshold")
 
     -- TAB 4: GEAR & FUEL
@@ -3324,7 +4704,7 @@ local function registerNativeHarvestUI()
     uiGear:addLabelApp("Gear World, Restock & Equip", "Build")
     uiGear:addLabel("World Ambil Alat & Fuel Pack:")
     uiGear:addInputString("Gear World (WORLD:DOOR)", HV.CFG.gear_world or "", "Gear World", "GEARWORLD:DOOR", "Home", "hv_input_gear_world")
-    uiGear:addButton("📍 Pakai World Sekarang (Gear)", "hv_btn_add_cur_gear")
+    uiGear:addButton("     Pakai World Sekarang (Gear)", "hv_btn_add_cur_gear")
     uiGear:addDivider()
     uiGear:addLabel("Auto Restock Magni (1252) + Fuel Pack (1746):")
     uiGear:addToggle("Ambil Magni & Fuel Pack Otomatis", HV.CFG.auto_magni_fuel == true, "hv_toggle_magni_fuel", false)
@@ -3333,9 +4713,9 @@ local function registerNativeHarvestUI()
     uiGear:addDivider()
     uiGear:addLabel("List ID Gear yang Dipakai (Auto-Equip):")
     uiGear:addInputString("ID Gear (Koma)", HV.CFG.gear_equip_ids or "6840, 1966", "Gear IDs", "6840, 1966", "Settings", "hv_input_gear_equip_ids")
-    uiGear:addButton("⚙️ Preset: DCS (6840) + Harvester (1966)", "hv_btn_gear_preset_both")
-    uiGear:addButton("🚜 Preset: Harvester Saja (1966)", "hv_btn_gear_preset_harv")
-    uiGear:addButton("⚡ Preset: DCS Saja (6840)", "hv_btn_gear_preset_dcs")
+    uiGear:addButton("       Preset: DCS (6840) + Harvester (1966)", "hv_btn_gear_preset_both")
+    uiGear:addButton("     Preset: Harvester Saja (1966)", "hv_btn_gear_preset_harv")
+    uiGear:addButton("    Preset: DCS Saja (6840)", "hv_btn_gear_preset_dcs")
 
     -- TAB 5: PENGATURAN & DELAY
     local uiSet = createNativeUI("5. Pengaturan & Delay", "Tune")
@@ -3612,5 +4992,37 @@ registerNativeHarvestUI()
 
 logMsg("`2BOREN HARVEST PRO v" .. HV.VERSION .. " SIAP! (/harvest)")
 notifyMsg("BOREN HARVEST PRO Siap!")
+
+
+-- ============================================================================
+-- 9. INISIALISASI AWAL COMPACT DIALOG HARVEST
+-- ============================================================================
+_G.showHarvestMainDialog = DLG.showHarvestMainDialog
+_G.DLG = DLG
+
+-- Inisialisasi awal saat script di-Run (Standar In-Game Dialog)
+logMsg("`5[BOREN HARVEST] `2Script Auto Harvest (In-Game Dialog) Aktif!")
+if LogToConsole then
+    pcall(LogToConsole, "`5[BOREN HARVEST] `2Ketik `c/hv `watau `c/harvest `wdi chat game untuk membuka Menu Form Dialog.")
+end
+if sendNotification then
+    pcall(sendNotification, "Boren Auto Harvest Siap! Ketik /hv di chat game.")
+end
+
+-- Otomatis buka dialog saat pertama kali di-run via coroutine
+local function openInitialHarvestDialog()
+    safeSleep(200)
+    local openFn = _G.showHarvestMainDialog or (DLG and DLG.showHarvestMainDialog)
+    if openFn then pcall(openFn) end
+end
+
+if runCoroutine then
+    pcall(runCoroutine, openInitialHarvestDialog)
+elseif runThread then
+    pcall(runThread, openInitialHarvestDialog)
+else
+    local openFn = _G.showHarvestMainDialog or (DLG and DLG.showHarvestMainDialog)
+    if openFn then pcall(openFn) end
+end
 
 return HV

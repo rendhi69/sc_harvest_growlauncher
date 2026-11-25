@@ -1,28 +1,21 @@
-# BOREN STORE - AUTO HARVEST PRO
+# Auto Harvest Pro - Growlauncher (Boren Store)
 
-Skrip otomatisasi Auto Harvest Pro untuk Growlauncher dengan Multi-World Farm & Save List, Auto Magni & Fuel Guard, Gear Equip, dan Console ImGui.
+Script Auto Harvest Growlauncher dengan Compact Dialog System.
+Multi-World Farm, Multi-World Save (ALL/BLOCK/SEED), Ignore Gems,
+Take Floating, Anti-Take saat Drop, Custom Limit, Disconnect Guard Warp.
 
-## Repository Khusus
-Repository ini dikhususkan **HANYA** untuk skrip dan loader **Harvest**.
-Tidak ada file dari skrip lain (Plant, Dirt Farm, Soil Builder, Transfer, Harvest) yang tercampur di sini.
+## Commands
+- `/hv` atau `/harvest` atau `/autoharvest` atau `/boren` atau `/menu`
 
-## File Utama
-- `auto_harvest.lua`: Skrip mandiri lengkap (Full Engine & UI)
-- `loader.lua`: Loader langsung untuk `auto_harvest.lua` dengan auto-fetch & auto-update dari GitHub
-- `loader_harvest.lua`: Loader Console ImGui khusus fitur Harvest
-- `mod_harvest.lua`: Modul ImGui Console
-- `imgui_hub/`: Direktori bootloader dan dependensi runtime Console ImGui mandiri
+## Features
+1. Farm List Multi-World dengan antrian otomatis
+2. Storage Multi-World (ALL / BLOCK / SEED) + Custom Limit per World
+3. Ignore Gems (ID 112) + Auto Collect Block/Seed Harvest
+4. Take Floating Block/Seed di Farm World (opsional)
+5. Ignore Take saat Drop ke Save World (anti retake otomatis)
+6. Disconnect Guard Warp (tunggu reconnect, tidak spam warp)
+7. Custom Max Block/Seed per Save World (10k/20k/50k/unlimited) + Drop Threshold
 
-## Cara Menjalankan di Growlauncher
-1. **Menggunakan Loader Otomatis:**
-   Eksekusi kode berikut di executor Growlauncher:
-   ```lua
-   fetch("https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/main/loader.lua?v=" .. os.time())()
-   ```
-   atau jalankan file `loader.lua` yang tersimpan di perangkat Anda.
-
-2. **Menggunakan Console ImGui:**
-   Jalankan `loader_harvest.lua`.
-
----
-Dikembangkan oleh **Boren Store** / **rendhi69**.
+## Files
+- `auto_harvest.lua` - Script utama (compact dialog)
+- `loader_harvest.lua` - Loader script

@@ -1,4 +1,14 @@
 -- ============================================================================
+-- GLOBAL ENGINE FORWARD DECLARATIONS (SAFETY FALLBACK)
+-- ============================================================================
+_G.checkAndDropIfFull = function(...)
+    if checkAndDropIfFull then return checkAndDropIfFull(...) end
+    return true
+end
+_G.updateInvPreview = function(...)
+    if updateInvPreview then return updateInvPreview(...) end
+end
+-- ============================================================================
 -- BOREN STORE - AUTO HARVEST PRO (STANDALONE SCRIPT)
 -- File: script/script code/auto_harvest.lua
 -- Repo: https://github.com/rendhi69/sc_harvest_growlauncher.git
@@ -2095,8 +2105,47 @@ local function scanRemainingReadyTrees(seedID, blockID)
     return scanWorldReadyTrees(seedID, blockID)
 end
 
-local checkAndDropIfFull
-local updateInvPreview
+local function updateInvPreview(blockID, seedID, eventList)
+    HV.STATE.inv_preview.block = getInvCount(blockID)
+    HV.STATE.inv_preview.seed  = getInvCount(seedID)
+    HV.STATE.inv_preview.fuel  = getInvCount(ITEM.FUEL_PACK)
+    local evSum = 0
+    for _, eid in ipairs(eventList or {}) do evSum = evSum + getInvCount(eid) end
+    HV.STATE.inv_preview.ev = evSum
+end
+_G.updateInvPreview = updateInvPreview
+
+local function checkAndDropIfFull(row, blockID, seedID, eventList, forceDrop)
+    updateInvPreview(blockID, seedID, eventList)
+    local c = HV.CFG
+    local th  = math.max(20, math.min(200, tonumber(c.drop_threshold) or 200))
+    local eth = math.max(10, math.min(200, tonumber(c.event_threshold) or 150))
+
+    -- 1. Cek Fuel Pack proaktif jika memakai harvester & fuel
+    if (not forceDrop) and c.auto_magni_fuel and (HV.STATE.need_fuel or getInvCount(ITEM.FUEL_PACK) <= 0) then
+        if not ensureGearAndFuel(row) then return false end
+    end
+
+    -- 2. Drop Item Event bila ada di tas
+    local needEventDrop = false
+    for _, eid in ipairs(eventList) do
+        local cnt = getInvCount(eid)
+        if (forceDrop and cnt > 0) or cnt >= eth then needEventDrop = true; break end
+    end
+    if needEventDrop and #HV.STATE.event_rows > 0 then
+        if not dropToEventWorlds(forceDrop and nil or row) then return false end
+    end
+
+    -- 3. Drop Block & Seed
+    local bCnt, sCnt = getInvCount(blockID), getInvCount(seedID)
+    if (forceDrop and (bCnt > 0 or sCnt > 0)) or bCnt >= th or sCnt >= th then
+        if not dropToSaveWorlds(blockID, seedID, forceDrop and nil or row) then return false end
+    end
+
+    updateInvPreview(blockID, seedID, eventList)
+    return true
+end
+_G.checkAndDropIfFull = checkAndDropIfFull
 
 local function harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
     local maxPasses = 3
@@ -2167,45 +2216,7 @@ local function auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowe
     return true
 end
 
-updateInvPreview = function(blockID, seedID, eventList)
-    HV.STATE.inv_preview.block = getInvCount(blockID)
-    HV.STATE.inv_preview.seed  = getInvCount(seedID)
-    HV.STATE.inv_preview.fuel  = getInvCount(ITEM.FUEL_PACK)
-    local evSum = 0
-    for _, eid in ipairs(eventList or {}) do evSum = evSum + getInvCount(eid) end
-    HV.STATE.inv_preview.ev = evSum
-end
-
-checkAndDropIfFull = function(row, blockID, seedID, eventList, forceDrop)
-    updateInvPreview(blockID, seedID, eventList)
-    local c = HV.CFG
-    local th  = math.max(20, math.min(200, tonumber(c.drop_threshold) or 200))
-    local eth = math.max(10, math.min(200, tonumber(c.event_threshold) or 150))
-
-    -- 1. Cek Fuel Pack proaktif jika memakai harvester & fuel
-    if (not forceDrop) and c.auto_magni_fuel and (HV.STATE.need_fuel or getInvCount(ITEM.FUEL_PACK) <= 0) then
-        if not ensureGearAndFuel(row) then return false end
-    end
-
-    -- 2. Drop Item Event bila ada di tas
-    local needEventDrop = false
-    for _, eid in ipairs(eventList) do
-        local cnt = getInvCount(eid)
-        if (forceDrop and cnt > 0) or cnt >= eth then needEventDrop = true; break end
-    end
-    if needEventDrop and #HV.STATE.event_rows > 0 then
-        if not dropToEventWorlds(forceDrop and nil or row) then return false end
-    end
-
-    -- 3. Drop Block & Seed
-    local bCnt, sCnt = getInvCount(blockID), getInvCount(seedID)
-    if (forceDrop and (bCnt > 0 or sCnt > 0)) or bCnt >= th or sCnt >= th then
-        if not dropToSaveWorlds(blockID, seedID, forceDrop and nil or row) then return false end
-    end
-
-    updateInvPreview(blockID, seedID, eventList)
-    return true
-end
+-- checkAndDropIfFull and updateInvPreview declared above
 
 local function sweepFloatingObjects(row, blockID, seedID, allowedSet, eventList)
     if not HV.CFG.take_floating then return true end
@@ -2594,7 +2605,7 @@ DLG.showHarvestMainDialog = function()
     local lines = {
         "set_default_color|`o",
         "add_quick_exit|",
-        "add_label_with_icon|big|`wBoren Auto Harvest Pro``|left|1830|",
+        "add_label_with_icon|big|`wBoren Auto Harvest Pro v2.1.0``|left|1830|",
         "add_spacer|small|",
         "add_textbox|`p------------------------------------------------------------|left|",
         string.format("add_textbox|`wStatus: %s `p- `wWorld: `b%s `p- `wMode: %s|left|", stBadge, curW, modeTxt),

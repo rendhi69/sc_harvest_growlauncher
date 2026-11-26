@@ -156,7 +156,8 @@ local LOCK_OR_DOOR_IDS = {
 }
 
 local function trimStr(s)
-    return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local res = tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return res
 end
 
 local function cleanWorldName(s)
@@ -602,15 +603,16 @@ local function getCurrentWorldSafe()
         end
     end
     if getWorld and type(getWorld) == "function" then
-        local ok, w = pcall(getWorld)
-        if ok and w then
-            if type(w) == "string" and w ~= "" then
-                local c = cleanWorldName(w)
-                if c ~= "" and c ~= "EXIT" then return c end
-            elseif (type(w) == "table" or type(w) == "userdata") and w.name then
-                local c = cleanWorldName(tostring(w.name))
-                if c ~= "" and c ~= "EXIT" then return c end
+        local ok, w = pcall(function()
+            local obj = getWorld()
+            if obj then
+                if type(obj) == "string" then return obj end
+                return obj.name
             end
+        end)
+        if ok and w and type(w) == "string" and w ~= "" then
+            local c = cleanWorldName(w)
+            if c ~= "" and c ~= "EXIT" then return c end
         end
     end
     if GetWorldName and type(GetWorldName) == "function" then
@@ -620,15 +622,20 @@ local function getCurrentWorldSafe()
             if c ~= "" and c ~= "EXIT" then return c end
         end
     end
-    if getLocalSafe then
-        local p = getLocalSafe()
-        if p and p.world and type(p.world) == "string" and p.world ~= "" then
-            local c = cleanWorldName(p.world)
+    if getLocal and type(getLocal) == "function" then
+        local ok, w = pcall(function()
+            local p = getLocal()
+            if p then return p.world end
+        end)
+        if ok and w and type(w) == "string" and w ~= "" then
+            local c = cleanWorldName(w)
             if c ~= "" and c ~= "EXIT" then return c end
         end
     end
     return "EXIT"
 end
+_G.getCurrentWorld = getCurrentWorldSafe
+getCurrentWorld = getCurrentWorldSafe
 
 local function getInvCount(itemID)
     if not itemID or itemID <= 0 then return 0 end
@@ -1098,7 +1105,8 @@ local activeNativeDialogs = {}
 _G.__BOREN_ACTIVE_NATIVE_DIALOGS = _G.__BOREN_ACTIVE_NATIVE_DIALOGS or {}
 
 local function sanitizeDialogVal(s)
-    return tostring(s or ""):gsub("[\r\n|]+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    local res = tostring(s or ""):gsub("[\r\n|]+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return res
 end
 
 local function showClientDialog(dText)
@@ -2087,6 +2095,9 @@ local function scanRemainingReadyTrees(seedID, blockID)
     return scanWorldReadyTrees(seedID, blockID)
 end
 
+local checkAndDropIfFull
+local updateInvPreview
+
 local function harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
     local maxPasses = 3
     for pass = 1, maxPasses do
@@ -2156,7 +2167,7 @@ local function auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowe
     return true
 end
 
-local function updateInvPreview(blockID, seedID, eventList)
+updateInvPreview = function(blockID, seedID, eventList)
     HV.STATE.inv_preview.block = getInvCount(blockID)
     HV.STATE.inv_preview.seed  = getInvCount(seedID)
     HV.STATE.inv_preview.fuel  = getInvCount(ITEM.FUEL_PACK)
@@ -2165,7 +2176,7 @@ local function updateInvPreview(blockID, seedID, eventList)
     HV.STATE.inv_preview.ev = evSum
 end
 
-local function checkAndDropIfFull(row, blockID, seedID, eventList, forceDrop)
+checkAndDropIfFull = function(row, blockID, seedID, eventList, forceDrop)
     updateInvPreview(blockID, seedID, eventList)
     local c = HV.CFG
     local th  = math.max(20, math.min(200, tonumber(c.drop_threshold) or 200))
@@ -3795,38 +3806,53 @@ _G.handleHarvestDialogReturn = handleHarvestDialogReturn
 -- Enhanced onSendPacket Hook to intercept Chat commands and Dialog Returns
 local orig_onSendPacketHook = onSendPacketHook
 local function onSendPacketEnhancedHook(p1, p2)
-    local pStr = nil
-    if type(p2) == "string" then pStr = p2
-    elseif type(p1) == "string" then pStr = p1 end
+    local intercepted = false
+    local retVal = false
 
-    if pStr and type(pStr) == "string" then
-        local lowerP = pStr:lower()
-        -- Intersepsi Chat Commands (/hv, /harvest, /autoharvest, /boren, /menu)
-        if lowerP:find("/hv", 1, true) or lowerP:find("/harvest", 1, true) or lowerP:find("/autoharvest", 1, true) or lowerP:find("/boren", 1, true) or lowerP:find("/menu", 1, true) then
-            if lowerP:find("action|input", 1, true) or lowerP:find("text|/", 1, true) or lowerP:find("action|chat", 1, true) or lowerP:sub(1, 1) == "/" then
-                local cmd = lowerP:match("|text|(/[a-z0-9_]+)") or lowerP:match("text|(/[a-z0-9_]+)") or lowerP:match("(/[a-z0-9_]+)")
-                if cmd == "/hv" or cmd == "/harvest" or cmd == "/autoharvest" or cmd == "/boren" or cmd == "/menu" then
-                    local openFn = _G.showHarvestMainDialog or (DLG and DLG.showHarvestMainDialog)
-                    if openFn then
-                        pcall(openFn)
-                        if LogToConsole then pcall(LogToConsole, "`2[BOREN HARVEST] `wMenu Dialog dibuka via chat: `e" .. tostring(cmd)) end
+    local ok, err = pcall(function()
+        local pStr = nil
+        if type(p2) == "string" then pStr = p2
+        elseif type(p1) == "string" then pStr = p1 end
+
+        if pStr and type(pStr) == "string" then
+            local lowerP = pStr:lower()
+            -- Intersepsi Chat Commands (/hv, /harvest, /autoharvest, /boren, /menu)
+            if lowerP:find("/hv", 1, true) or lowerP:find("/harvest", 1, true) or lowerP:find("/autoharvest", 1, true) or lowerP:find("/boren", 1, true) or lowerP:find("/menu", 1, true) then
+                if lowerP:find("action|input", 1, true) or lowerP:find("text|/", 1, true) or lowerP:find("action|chat", 1, true) or lowerP:sub(1, 1) == "/" then
+                    local cmd = lowerP:match("|text|(/[a-z0-9_]+)") or lowerP:match("text|(/[a-z0-9_]+)") or lowerP:match("(/[a-z0-9_]+)")
+                    if cmd == "/hv" or cmd == "/harvest" or cmd == "/autoharvest" or cmd == "/boren" or cmd == "/menu" then
+                        local openFn = _G.showHarvestMainDialog or (DLG and DLG.showHarvestMainDialog)
+                        if openFn then
+                            pcall(openFn)
+                            if LogToConsole then pcall(LogToConsole, "`2[BOREN HARVEST] `wMenu Dialog dibuka via chat: `e" .. tostring(cmd)) end
+                        end
+                        intercepted = true
+                        retVal = true
+                        return
                     end
-                    return true
+                end
+            end
+
+            -- Intersepsi Dialog Return Compact Harvest
+            if pStr:find("action|dialog_return", 1, true) then
+                local handler = _G.handleHarvestDialogReturn or handleHarvestDialogReturn
+                if handler then
+                    local hOk, hRet = pcall(handler, pStr)
+                    if hOk and hRet then
+                        intercepted = true
+                        retVal = true
+                        return
+                    end
                 end
             end
         end
+    end)
 
-        -- Intersepsi Dialog Return Compact Harvest
-        if pStr:find("action|dialog_return", 1, true) then
-            local handler = _G.handleHarvestDialogReturn or handleHarvestDialogReturn
-            if handler and handler(pStr) then
-                return true
-            end
-        end
-    end
+    if intercepted then return retVal end
 
     if orig_onSendPacketHook then
-        return orig_onSendPacketHook(p1, p2)
+        local oOk, oRet = pcall(orig_onSendPacketHook, p1, p2)
+        if oOk then return oRet end
     end
 end
 
@@ -4932,23 +4958,34 @@ local function registerNativeHarvestUI()
     uiSet:addSlider("Delay Warp Antar World (ms)", 1000, 10000, HV.CFG.warp_delay or 4500, 500, false, "hv_slider_warp_delay")
 
     pcall(addCategory, "Boren Harvest Pro", "Agriculture")
-    pcall(addIntoModule, "Boren Harvest Pro", uiFarm:generateJSON())
-    pcall(addIntoModule, "Boren Harvest Pro", uiSave:generateJSON())
-    pcall(addIntoModule, "Boren Harvest Pro", uiEvent:generateJSON())
-    pcall(addIntoModule, "Boren Harvest Pro", uiGear:generateJSON())
-    pcall(addIntoModule, "Boren Harvest Pro", uiSet:generateJSON())
+    pcall(addIntoModule, uiFarm:generateJSON(), "Boren Harvest Pro")
+    pcall(addIntoModule, uiSave:generateJSON(), "Boren Harvest Pro")
+    pcall(addIntoModule, uiEvent:generateJSON(), "Boren Harvest Pro")
+    pcall(addIntoModule, uiGear:generateJSON(), "Boren Harvest Pro")
+    pcall(addIntoModule, uiSet:generateJSON(), "Boren Harvest Pro")
 end
 
-function OnValue(a1, a2, a3)
-    local name, val = a1, a2
-    if type(a1) == "table" then
-        name = a1.name or a1.alias or a1.id
-        val  = a1.value or a1.val
-    elseif a3 ~= nil then
-        name = a2
-        val  = a3
+local lastAliasEventTime = {}
+
+local function handleUIValue(vtype, name, value)
+    if type(vtype) == "string" and (name == nil or type(name) ~= "string" or (type(name) == "string" and vtype:sub(1, 3) == "hv_")) then
+        value = name
+        name = vtype
+        vtype = 0
     end
-    if not name then return end
+    name = tostring(name or "")
+    if name == "" then return end
+
+    local now = safeClock()
+    local isButton = (name:sub(1, 7) == "hv_btn_")
+    if isButton then
+        if lastAliasEventTime[name] and (now - lastAliasEventTime[name]) < 0.25 then
+            return
+        end
+        lastAliasEventTime[name] = now
+    end
+
+    local val = value
 
     local c = HV.CFG
     local st = HV.STATE
@@ -4980,7 +5017,7 @@ function OnValue(a1, a2, a3)
             addLog("Farm ditambah: " .. w)
         end
     elseif name == "hv_btn_add_cur_farm" then
-        local cw = getCurrentWorld()
+        local cw = getCurrentWorldSafe()
         if cw ~= "" and cw ~= "EXIT" then
             local iid = tonumber(st.input_add_id) or c.default_item_id or 4584
             table.insert(st.rows, { name = cw, door = "", item_id = iid, status = "Ready" })
@@ -5021,7 +5058,7 @@ function OnValue(a1, a2, a3)
             addLog("Save World ditambah: " .. w .. " (" .. (st.input_save_type or "ALL") .. ")")
         end
     elseif name == "hv_btn_add_cur_save" then
-        local cw = getCurrentWorld()
+        local cw = getCurrentWorldSafe()
         if cw ~= "" and cw ~= "EXIT" then
             local lim = tonumber(st.input_save_lim) or c.default_save_limit or 20000
             table.insert(st.save_rows, { name = cw, door = "", save_type = st.input_save_type or "ALL", limit = lim, count = 0, status = "Ready" })
@@ -5059,7 +5096,7 @@ function OnValue(a1, a2, a3)
             addLog("Event World ditambah: " .. w)
         end
     elseif name == "hv_btn_add_cur_ev" then
-        local cw = getCurrentWorld()
+        local cw = getCurrentWorldSafe()
         if cw ~= "" and cw ~= "EXIT" then
             local lim = tonumber(st.input_ev_lim) or c.default_ev_limit or 10000
             table.insert(st.event_rows, { name = cw, door = "", limit = lim, count = 0, status = "Ready" })
@@ -5090,7 +5127,7 @@ function OnValue(a1, a2, a3)
         c.gear_world = trimStr(val or "")
         HV.saveData()
     elseif name == "hv_btn_add_cur_gear" then
-        local cw = getCurrentWorld()
+        local cw = getCurrentWorldSafe()
         if cw ~= "" and cw ~= "EXIT" then
             c.gear_world = cw .. ":"
             HV.saveData()
@@ -5159,6 +5196,13 @@ function OnValue(a1, a2, a3)
 end
 onValue = OnValue
 
+function OnValue(a1, a2, a3)
+    pcall(handleUIValue, a1, a2, a3)
+end
+onValue = OnValue
+_G.OnValue = OnValue
+_G.onValue = OnValue
+
 -- Global hook setup
 if setOnValue then
     local aliases = {
@@ -5178,9 +5222,15 @@ if setOnValue then
         "hv_toggle_mode_zigzag", "hv_toggle_modfly", "hv_toggle_loop",
         "hv_slider_harvest_delay", "hv_slider_step_delay", "hv_slider_warp_delay",
     }
-    for _, al in ipairs(aliases) do
-        pcall(setOnValue, al, function(a1, a2, a3)
-            OnValue(al, a1 or a2 or a3)
+    for _, aliasName in ipairs(aliases) do
+        pcall(setOnValue, aliasName, function(a1, a2, a3)
+            if a2 == aliasName then
+                OnValue(a1, a2, a3)
+            elseif a1 == aliasName then
+                OnValue(0, a1, a2)
+            else
+                OnValue(0, aliasName, a1)
+            end
         end)
     end
 end

@@ -101,16 +101,19 @@ end
 -- 1. ONLINE-FIRST: FETCH DARI GITHUB RAW / JSDELIVR CDN RESMI
 -- ============================================================================
 local ONLINE_URLS = {
+    -- 1. Direct Commit SHA (Instant bypass semua cache)
+    "https://cdn.jsdelivr.net/gh/rendhi69/sc_harvest_growlauncher@f4c1e6597347f5eeeef267144c3fbb456b9866ce/auto_harvest.lua",
+    "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/f4c1e6597347f5eeeef267144c3fbb456b9866ce/auto_harvest.lua",
+    -- 2. Latest main branch
     "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/main/auto_harvest.lua",
     "https://cdn.jsdelivr.net/gh/rendhi69/sc_harvest_growlauncher@main/auto_harvest.lua",
     "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/refs/heads/main/auto_harvest.lua",
     "https://fastly.jsdelivr.net/gh/rendhi69/sc_harvest_growlauncher@main/auto_harvest.lua",
     "https://raw.githubusercontent.com/rendhi69/sc_harvest_growlauncher/main/auto_harvest.lua?v=" .. makeAntiCacheTag(),
-    "https://cdn.jsdelivr.net/gh/rendhi69/sc_harvest_growlauncher@main/auto_harvest.lua?v=" .. makeAntiCacheTag(),
 }
 
 logMsg("`9Menghubungkan ke server untuk mengunduh Boren Auto Harvest Pro terbaru...")
-notifyUser("Memuat Boren Auto Harvest Pro...")
+notifyUser("Memuat Boren Auto Harvest Pro v2.1.0...")
 
 local fetcher = fetch or (http and http.get) or (client and client.fetch) or (growtopia and growtopia.fetch)
 local content = nil
@@ -159,6 +162,7 @@ if content and #content > 1000 then
         if okRun then
             logMsg("`2[ONLINE v2.1.0] Boren Auto Harvest Pro Berhasil Aktif!")
             notifyUser("`2[ONLINE v2.1.0] Boren Auto Harvest Siap! (/hv)")
+            if _G.showHarvestMainDialog then pcall(_G.showHarvestMainDialog) end
             return
         else
             logMsg("`4Error runtime skrip online: " .. tostring(runErr))
@@ -187,6 +191,7 @@ for _, p in ipairs(LOCAL_PATHS) do
                     if okRun then
                         logMsg("`3[LOKAL] Boren Auto Harvest Cadangan Lokal Berhasil Aktif!")
                         notifyUser("`4[LOKAL] File lokal dimuat (Bukan online terbaru)!")
+                        if _G.showHarvestMainDialog then pcall(_G.showHarvestMainDialog) end
                         return
                     else
                         logMsg("`4Error runtime skrip lokal: " .. tostring(runErr))

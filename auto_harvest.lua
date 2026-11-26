@@ -683,6 +683,11 @@ local function setCollectCheats(enable)
     if editToggle then
         pcall(editToggle, "Auto Collect", v)
         pcall(editToggle, "Anti Collect", not v)
+        if HV.CFG.use_modfly ~= false and v then
+            pcall(editToggle, "ModFly", true)
+            pcall(editToggle, "Anti Lava", true)
+            pcall(editToggle, "No Lava", true)
+        end
     end
 end
 
@@ -1608,8 +1613,8 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
 
     local rows = HV.STATE.save_rows
     if #rows == 0 then
-        addLog("`4[Save World] Daftar Save World kosong! Tambahkan di tab Save World.")
-        return false
+        addLog("`e[Save World] World penyimpanan belum diatur (opsional) - tas penuh tapi panen tetap dilanjutkan.")
+        return true
     end
 
     -- Kunci anti_take & in_save_world selama di Save World
@@ -1637,7 +1642,7 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
             end
 
             if not targetRow then
-                addLog(string.format("`4[Save World] Semua world untuk %s sudah penuh / tidak tersedia!", itm.name))
+                addLog(string.format("`e[Save World] Semua world untuk %s sudah penuh / tidak tersedia - melanjutkan panen.", itm.name))
                 break
             end
 
@@ -1692,7 +1697,7 @@ local function dropToSaveWorlds(blockID, seedID, returnFarm)
         HV.STATE.in_save_world = false
         HV.STATE.anti_take = false
     end
-    return (getInvCount(blockID) == 0 and getInvCount(seedID) == 0)
+    return true
 end
 
 local function dropToEventWorlds(returnFarm)
@@ -2125,13 +2130,13 @@ local function checkAndDropIfFull(row, blockID, seedID, eventList, forceDrop)
         if (forceDrop and cnt > 0) or cnt >= eth then needEventDrop = true; break end
     end
     if needEventDrop and #HV.STATE.event_rows > 0 then
-        if not dropToEventWorlds(forceDrop and nil or row) then return false end
+        pcall(dropToEventWorlds, forceDrop and nil or row)
     end
 
     -- 3. Drop Block & Seed
     local bCnt, sCnt = getInvCount(blockID), getInvCount(seedID)
     if (forceDrop and (bCnt > 0 or sCnt > 0)) or bCnt >= th or sCnt >= th then
-        if not dropToSaveWorlds(blockID, seedID, forceDrop and nil or row) then return false end
+        pcall(dropToSaveWorlds, blockID, seedID, forceDrop and nil or row)
     end
 
     updateInvPreview(blockID, seedID, eventList)
@@ -2269,6 +2274,11 @@ local function processFarmWorld(row)
         row.status = "Inaccessible"; HV.saveData(); return false
     end
 
+    if editToggle and HV.CFG.use_modfly ~= false then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
     setCollectCheats(true)
     -- Pastikan world tiles telah termuat sempurna sebelum scan pohon
     waitForWorldTiles(4000)
@@ -2438,6 +2448,12 @@ local function processFarmWorld(row)
     checkAndDropIfFull(row, blockID, seedID, eventList, true)
 
     local remainingTrees = #scanWorldReadyTrees(seedID, blockID)
+    if not HV.STATE.running then
+        row.status = "Ready"
+        HV.saveData()
+        addLog(string.format("`eWorld %s: Panen dihentikan sebelum selesai (Pohon tersisa: %d).", row.name, remainingTrees))
+        return false
+    end
     if remainingTrees == 0 and HV.STATE.total_harvested == 0 then
         row.status = "No Ready Trees"
         HV.saveData()
@@ -2454,6 +2470,12 @@ end
 local function harvestLoopRunner()
     HV.STATE.running = true
     HV.STATE.enabled = true
+    if editToggle and HV.CFG.use_modfly ~= false then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+    setCollectCheats(true)
     addLog("`2Auto Harvest dimulai...")
 
     while HV.STATE.running do
@@ -2526,6 +2548,13 @@ function HV.start()
     end
     HV.saveData()
     addLog("`a[Auto] Status antrean farm di-reset ke Ready!")
+
+    if editToggle and HV.CFG.use_modfly ~= false then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+    setCollectCheats(true)
 
     -- Jalankan coroutine dengan pcall pelindung agar error tidak hilang diam-diam
     if runCoroutine then

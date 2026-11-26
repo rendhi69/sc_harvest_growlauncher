@@ -16,6 +16,34 @@
 --  10. Dual UI: Dear ImGui Standalone Window + Native Growlauncher 5-Tab Menu
 -- ============================================================================
 
+
+local function sendPacketSafe(t, str)
+    local fn = sendPacket or SendPacket
+    if fn and type(fn) == "function" then
+        local ok = pcall(fn, t, str)
+        if ok then return true end
+    end
+    if growtopia and growtopia.sendPacket then
+        local ok = pcall(growtopia.sendPacket, t, str)
+        if ok then return true end
+    end
+    return false
+end
+
+local function resolveItemName(itemID)
+    local id = tonumber(itemID) or 0
+    if id <= 0 then return "None" end
+    if getItemInfo and type(getItemInfo) == "function" then
+        local ok, info = pcall(getItemInfo, id)
+        if ok and info and info.name and info.name ~= "" then return tostring(info.name) end
+    end
+    if growtopia and growtopia.getItemName then
+        local ok, nm = pcall(growtopia.getItemName, id)
+        if ok and nm and nm ~= "" then return tostring(nm) end
+    end
+    return "ID " .. tostring(id)
+end
+
 local function logMsg(msg)
     if LogToConsole then pcall(LogToConsole, "`e[BOREN HARVEST] `w" .. tostring(msg)) end
 end
@@ -189,10 +217,10 @@ local function splitColons(str)
     return parts
 end
 
-local function getStorageCandidates()
-    local fn = "boren_hub_harvest_data.txt"
+local function getStorageCandidates(customFn)
+    local fn = customFn or "boren_hub_harvest_data.txt"
     if isSystemWindows() then
-        return { fn }
+        return { fn, "script/" .. fn, "script/dialog/harvest/" .. fn }
     end
     return {
         "/storage/emulated/0/Download/" .. fn,
@@ -200,13 +228,24 @@ local function getStorageCandidates()
         "/storage/emulated/0/Android/media/launcher.powerkuy.growlauncher/ScriptLua/" .. fn,
         "/storage/emulated/0/Android/data/launcher.powerkuy.growlauncher/files/ScriptLua/" .. fn,
         fn,
+        "script/" .. fn,
+        "script/dialog/harvest/" .. fn,
     }
 end
 
-local function readStorageContent()
-    local candidates = getStorageCandidates()
+local function readStorageContent(customFn)
+    local fn = customFn or "boren_hub_harvest_data.txt"
+    -- 0. Coba baca dari saved:get jika tersedia
+    if saved and saved.get and fn == "boren_hub_harvest_data.txt" then
+        local ok, sVal = pcall(function() return saved:get("boren_harvest_hub_data", "") end)
+        if ok and type(sVal) == "string" and (sVal:find("ROW=", 1, true) or #sVal > 15) then
+            return sVal
+        end
+    end
+
+    local candidates = getStorageCandidates(fn)
     -- 1. Baca via readFile native GrowLauncher jika tersedia
-    if readFile then
+    if readFile and type(readFile) == "function" then
         for _, path in ipairs(candidates) do
             local ok, txt = pcall(readFile, path)
             if ok and type(txt) == "string" and (txt:find("ROW=", 1, true) or #txt > 10) then
@@ -243,19 +282,20 @@ local function readStorageContent()
     return nil
 end
 
-local function writeStorageContent(content)
-    local candidates = getStorageCandidates()
+local function writeStorageContent(content, customFn)
+    local fn = customFn or "boren_hub_harvest_data.txt"
+    local candidates = getStorageCandidates(fn)
     local wroteAny = false
 
     -- 1. Tulis via native writeFile jika tersedia di engine
-    if writeFile then
+    if writeFile and type(writeFile) == "function" then
         for _, path in ipairs(candidates) do
             local ok = pcall(writeFile, path, content)
             if ok then wroteAny = true end
         end
     end
-    if writeToLocal then
-        pcall(writeToLocal, "boren_hub_harvest_data.txt", content)
+    if writeToLocal and type(writeToLocal) == "function" then
+        pcall(writeToLocal, fn, content)
         wroteAny = true
     end
 
@@ -272,6 +312,15 @@ local function writeStorageContent(content)
             end
         end
     end
+
+    -- 3. Simpan juga ke saved:set jika tersedia di Growlauncher
+    if saved and saved.set and fn == "boren_hub_harvest_data.txt" then
+        pcall(function()
+            saved:set("boren_harvest_hub_data", content)
+            if saved.save then saved:save() end
+        end)
+    end
+
     return wroteAny
 end
 
@@ -397,18 +446,33 @@ function HV.saveData()
         "TAKESEED=" .. (c.take_seed ~= false and "1" or "0"),
         "IGNTAKEDROP=" .. (c.ignore_take_drop ~= false and "1" or "0"),
     }
+
+    local farmBackupLines = {}
     for _, r in ipairs(HV.STATE.rows) do
         table.insert(lines, string.format("ROW=%s:%s:%d|%s", r.name, r.door or "", r.item_id or c.default_item_id, r.status or "Ready"))
+        table.insert(farmBackupLines, string.format("%s:%s:%d", r.name, r.door or "", r.item_id or c.default_item_id))
     end
+
+    local saveBackupLines = {}
     for _, r in ipairs(HV.STATE.save_rows) do
         table.insert(lines, string.format("SAVEROW=%s:%s:%s:%d:%d|%s", r.name, r.door or "", r.save_type or "ALL", r.limit or 20000, r.count or 0, r.status or "Ready"))
+        table.insert(saveBackupLines, string.format("%s:%s:%s:%d", r.name, r.door or "", r.save_type or "ALL", r.limit or 20000))
     end
+
     for _, r in ipairs(HV.STATE.event_rows) do
         table.insert(lines, string.format("EVROW=%s:%s:%d:%d|%s", r.name, r.door or "", r.limit or 10000, r.count or 0, r.status or "Ready"))
     end
 
     local textContent = table.concat(lines, "\n")
-    writeStorageContent(textContent)
+    writeStorageContent(textContent, "boren_hub_harvest_data.txt")
+
+    -- Backup cadangan agar world list tidak pernah hilang
+    if #farmBackupLines > 0 then
+        writeStorageContent(table.concat(farmBackupLines, "\n"), "boren_harvest_farms.txt")
+    end
+    if #saveBackupLines > 0 then
+        writeStorageContent(table.concat(saveBackupLines, "\n"), "boren_harvest_storages.txt")
+    end
 end
 
 function HV.loadData()
@@ -474,14 +538,36 @@ function HV.loadData()
         end
     end
 
-    -- Update state hanya jika hasil load berisi data atau memory kosong
-    if #loadedRows > 0 or #HV.STATE.rows == 0 then
+    -- Fallback cadangan: Jika loadedRows kosong, coba baca dari boren_harvest_farms.txt
+    if #loadedRows == 0 then
+        local rawFarms = readStorageContent("boren_harvest_farms.txt")
+        if rawFarms and rawFarms ~= "" then
+            for line in rawFarms:gmatch("[^\r\n]+") do
+                local p = parseFarmRow(line)
+                if p then table.insert(loadedRows, p) end
+            end
+        end
+    end
+
+    -- Fallback cadangan: Jika loadedSaveRows kosong, coba baca dari boren_harvest_storages.txt
+    if #loadedSaveRows == 0 then
+        local rawSaves = readStorageContent("boren_harvest_storages.txt")
+        if rawSaves and rawSaves ~= "" then
+            for line in rawSaves:gmatch("[^\r\n]+") do
+                local p = parseSaveRow(line)
+                if p then table.insert(loadedSaveRows, p) end
+            end
+        end
+    end
+
+    -- Update state HANYA jika hasil load berisi data valid (JANGAN hapus antrean di memori jika file kosong!)
+    if #loadedRows > 0 then
         HV.STATE.rows = loadedRows
     end
-    if #loadedSaveRows > 0 or #HV.STATE.save_rows == 0 then
+    if #loadedSaveRows > 0 then
         HV.STATE.save_rows = loadedSaveRows
     end
-    if #loadedEventRows > 0 or #HV.STATE.event_rows == 0 then
+    if #loadedEventRows > 0 then
         HV.STATE.event_rows = loadedEventRows
     end
 
@@ -508,22 +594,37 @@ local function getPlayerPos()
 end
 
 local function getCurrentWorldSafe()
-    local fns = { getCurrentWorldName, GetWorldName, getWorld, getCurrentWorld, GetWorld }
-    for _, fn in ipairs(fns) do
-        if type(fn) == "function" then
-            local ok, res = pcall(fn)
-            if ok and res ~= nil then
-                if type(res) == "string" then
-                    local nm = cleanWorldName(res)
-                    if nm ~= "" then return nm end
-                elseif type(res) == "table" or type(res) == "userdata" then
-                    local okN, nm = pcall(function() return res.name or res.worldName end)
-                    if okN and type(nm) == "string" then
-                        local c = cleanWorldName(nm)
-                        if c ~= "" then return c end
-                    end
-                end
+    if getCurrentWorldName and type(getCurrentWorldName) == "function" then
+        local ok, n = pcall(getCurrentWorldName)
+        if ok and n and type(n) == "string" and n ~= "" then
+            local c = cleanWorldName(n)
+            if c ~= "" and c ~= "EXIT" then return c end
+        end
+    end
+    if getWorld and type(getWorld) == "function" then
+        local ok, w = pcall(getWorld)
+        if ok and w then
+            if type(w) == "string" and w ~= "" then
+                local c = cleanWorldName(w)
+                if c ~= "" and c ~= "EXIT" then return c end
+            elseif (type(w) == "table" or type(w) == "userdata") and w.name then
+                local c = cleanWorldName(tostring(w.name))
+                if c ~= "" and c ~= "EXIT" then return c end
             end
+        end
+    end
+    if GetWorldName and type(GetWorldName) == "function" then
+        local ok, n = pcall(GetWorldName)
+        if ok and n and type(n) == "string" and n ~= "" then
+            local c = cleanWorldName(n)
+            if c ~= "" and c ~= "EXIT" then return c end
+        end
+    end
+    if getLocalSafe then
+        local p = getLocalSafe()
+        if p and p.world and type(p.world) == "string" and p.world ~= "" then
+            local c = cleanWorldName(p.world)
+            if c ~= "" and c ~= "EXIT" then return c end
         end
     end
     return "EXIT"
@@ -817,9 +918,9 @@ local function warpToWorldInner(wName, doorID)
         end
 
         if cur ~= wName then
-            if sendPacket then
-                pcall(sendPacket, 3, "action|join_request\nname|" .. joinStr .. "\ninvitedWorld|0\n")
-            elseif growtopia and growtopia.warpTo then
+            addLog(string.format("`9[Warp] Warp ke %s (Percobaan %d/4)...", joinStr, attempt))
+            local sent = sendPacketSafe(3, "action|join_request\nname|" .. joinStr .. "\ninvitedWorld|0\n")
+            if not sent and growtopia and growtopia.warpTo then
                 pcall(growtopia.warpTo, joinStr)
             end
 
@@ -1766,17 +1867,39 @@ local function isTileTreeReady(t)
     local fg = tonumber(t.fg) or 0
     if fg <= 0 then return false end
 
-    -- 1. Explicit ready flags from various Growlauncher versions
+    -- 1. Explicit ready flags (boolean / string / number / method)
     if t.readyharvest == true or t.readyharvest == 1 or t.readyharvest == "true" then return true end
+    if type(t.readyharvest) == "function" then
+        local ok, r = pcall(t.readyharvest, t)
+        if ok and (r == true or r == 1) then return true end
+        local ok2, r2 = pcall(t.readyharvest)
+        if ok2 and (r2 == true or r2 == 1) then return true end
+    end
+
     if t.ready_to_harvest == true or t.ready_to_harvest == 1 or t.ready_to_harvest == "true" then return true end
+    if type(t.ready_to_harvest) == "function" then
+        local ok, r = pcall(t.ready_to_harvest, t)
+        if ok and (r == true or r == 1) then return true end
+    end
+
     if t.ready_harvest == true or t.ready_harvest == 1 or t.ready_harvest == "true" then return true end
     if t.ready == true or t.ready == 1 or t.ready == "true" then return true end
+    if type(t.ready) == "function" then
+        local ok, r = pcall(t.ready, t)
+        if ok and (r == true or r == 1) then return true end
+    end
 
-    -- 2. canHarvest / can_harvest (bisa boolean atau fungsi)
+    if t.isReady == true or t.is_ready == true then return true end
+    if type(t.isReady) == "function" then
+        local ok, r = pcall(t.isReady, t)
+        if ok and (r == true or r == 1) then return true end
+    end
+
+    -- 2. canHarvest / can_harvest (boolean / method)
     if t.canHarvest ~= nil then
         if type(t.canHarvest) == "function" then
             local ok, res = pcall(t.canHarvest, t)
-            if ok and res == true then return true end
+            if ok and (res == true or res == 1) then return true end
         elseif t.canHarvest == true or t.canHarvest == 1 then
             return true
         end
@@ -1784,34 +1907,46 @@ local function isTileTreeReady(t)
     if t.can_harvest ~= nil then
         if type(t.can_harvest) == "function" then
             local ok, res = pcall(t.can_harvest, t)
-            if ok and res == true then return true end
+            if ok and (res == true or res == 1) then return true end
         elseif t.can_harvest == true or t.can_harvest == 1 then
             return true
         end
     end
 
-    -- 3. Progress (>= 1.0 float atau >= 100 percentage)
+    -- 3. Direct fruit count on tile
+    local directFruits = tonumber(t.fruitcount or t.fruit_count or t.fruits or t.fruit) or 0
+    if directFruits > 0 then return true end
+
+    -- 4. Progress (>= 1.0 float atau >= 100 percentage)
     local prog = tonumber(t.progress)
     if prog and (prog >= 1.0 or prog >= 100) then return true end
 
-    -- 4. Tile flags (Growtopia mature tree flag 0x0010)
-    local flags = tonumber(t.flags)
-    if flags and bit32 and bit32.band(flags, 0x10) ~= 0 then return true end
-    if flags and (flags % 32 >= 16) then return true end
+    -- 5. Extra table / userdata (fruit count > 0 atau growth <= 0 pada seed)
+    if t.extra and (type(t.extra) == "table" or type(t.extra) == "userdata") then
+        local okF, fCount = pcall(function()
+            return tonumber(t.extra.fruitcount or t.extra.fruit_count or t.extra.fruits or t.extra.fruit)
+        end)
+        if okF and fCount and fCount > 0 then return true end
 
-    -- 5. Extra table (growth <= 0 dan fruit count > 0)
-    if t.extra and type(t.extra) == "table" then
-        local fCount = tonumber(t.extra.fruitcount or t.extra.fruit_count or t.extra.fruits or t.extra.fruit) or 0
-        if fCount > 0 then return true end
-        local growth = tonumber(t.extra.growth or t.extra.time_left or t.extra.grow_time)
-        if growth and growth <= 0 and (fg % 2 == 1) then
+        local okG, growth = pcall(function()
+            return tonumber(t.extra.growth or t.extra.time_left or t.extra.grow_time)
+        end)
+        if okG and growth and growth <= 0 and (fg % 2 == 1) then
             return true
         end
     end
 
-    -- 6. Direct fruitcount on tile
-    local directFruits = tonumber(t.fruitcount or t.fruit_count or t.fruits) or 0
-    if directFruits > 0 then return true end
+    -- 6. Direct growth <= 0 on tree tile
+    local directGrowth = tonumber(t.growth or t.time_left)
+    if directGrowth and directGrowth <= 0 and (fg % 2 == 1) then
+        return true
+    end
+
+    -- 7. Tile flags (mature tree flag 0x0010 atau 0x0020)
+    local flags = tonumber(t.flags)
+    if flags and (fg % 2 == 1) then
+        if (flags % 32 >= 16) or (flags % 64 >= 32) then return true end
+    end
 
     return false
 end
@@ -2107,6 +2242,8 @@ local function processFarmWorld(row)
 
     row.status = "Warping..."
     HV.STATE.status_text = "Warp: " .. row.name
+    addLog(string.format("`9[Warp] Memulai warp ke world %s...", row.name))
+
     if not warpToWorld(row.name, row.door) then
         local _hvOnline = isPlayerOnlineInWorld()
         if not _hvOnline then
@@ -2117,21 +2254,26 @@ local function processFarmWorld(row)
         end
         row.status = "Inaccessible"; HV.saveData(); return false
     end
-    setCollectCheats(true)
-    safeSleep(500)
 
-    -- Auto-Detect: Cek apakah ada pohon yang cocok di world. Bila 0, scan otomatis pohon matang di world!
+    setCollectCheats(true)
+    -- Pastikan world tiles telah termuat sempurna sebelum scan pohon
+    waitForWorldTiles(4000)
+    safeSleep(600)
+    addLog(string.format("`2[Warp] Berhasil masuk ke world %s. Memeriksa pohon matang...", row.name))
+
+    -- Auto-Detect: Cek pohon matang di world. Scan bertahap untuk akurasi maksimal.
     local initialReady = 0
     for testY = 1, 53 do
         for testX = 2, 97 do
             if isReadyTree(testX, testY, seedID, blockID) then
                 initialReady = initialReady + 1
-                if initialReady >= 1 then break end
+                if initialReady >= 2 then break end
             end
         end
-        if initialReady >= 1 then break end
+        if initialReady >= 2 then break end
     end
 
+    -- Jika pohon sesuai row.item_id tidak ditemukan, jalankan full auto-detect pohon matang di world
     if initialReady == 0 then
         local detectedCounts = {}
         for scY = 1, 53 do
@@ -2139,7 +2281,7 @@ local function processFarmWorld(row)
                 local t = getTileSafe(scX, scY)
                 if t and isTileTreeReady(t) then
                     local fg = tonumber(t.fg) or 0
-                    if fg > 0 then
+                    if fg > 0 and (fg % 2 == 1) then -- hanya seed/tree (ganjil)
                         detectedCounts[fg] = (detectedCounts[fg] or 0) + 1
                     end
                 end
@@ -2154,11 +2296,15 @@ local function processFarmWorld(row)
         if bestFg and bestCnt > 0 then
             blockID, seedID = normalizeHarvestPair(bestFg)
             row.item_id = blockID
-            if HV.CFG.take_block ~= false then allowedSet[blockID] = true end
-            if HV.CFG.take_seed ~= false then allowedSet[seedID] = true end
+            allowedSet[blockID] = (HV.CFG.take_block ~= false)
+            allowedSet[seedID] = (HV.CFG.take_seed ~= false)
             HV.saveData()
-            addLog(string.format("`a[Auto-Detect] Menemukan %d pohon matang di %s -> ID Block: %d, Seed: %d", bestCnt, row.name, blockID, seedID))
+            addLog(string.format("`a[Auto-Detect] Terdeteksi %d pohon %s di %s (Seed: %d, Block: %d)", bestCnt, resolveItemName(seedID), row.name, seedID, blockID))
+        else
+            addLog(string.format("`e[Auto-Detect] Tidak terdeteksi pohon matang yang siap panen di %s.", row.name))
         end
+    else
+        addLog(string.format("`a[Harvest] Menemukan pohon target %s di %s (Seed: %d, Block: %d)", resolveItemName(seedID), row.name, seedID, blockID))
     end
 
     local hDelay = math.max(60, tonumber(HV.CFG.harvest_delay) or 120)
@@ -2278,6 +2424,13 @@ local function processFarmWorld(row)
     checkAndDropIfFull(row, blockID, seedID, eventList, true)
 
     local remainingTrees = #scanWorldReadyTrees(seedID, blockID)
+    if remainingTrees == 0 and HV.STATE.total_harvested == 0 then
+        row.status = "No Ready Trees"
+        HV.saveData()
+        addLog(string.format("`eWorld %s: Tidak ada pohon matang untuk dipanen.", row.name))
+        return true
+    end
+
     row.status = "Done"
     HV.saveData()
     addLog(string.format("`2World %s SELESAI dipanen (Pohon tersisa: %d)!", row.name, remainingTrees))
@@ -2329,11 +2482,57 @@ end
 
 function HV.start()
     if HV.STATE.running then return false end
+
+    -- Jika daftar farm masih kosong, otomatis masukkan world aktif saat ini
     if #HV.STATE.rows == 0 then
-        addLog("`4Daftar Farm kosong! Tambahkan world di tab Farm List.")
-        return false
+        local curW = getCurrentWorldSafe()
+        if curW and curW ~= "" and curW ~= "EXIT" then
+            table.insert(HV.STATE.rows, { name = curW, door = "", item_id = HV.CFG.default_item_id, status = "Ready" })
+            HV.saveData()
+            addLog("`2[Auto] World aktif " .. curW .. " otomatis dimasukkan ke antrean farm!")
+        else
+            addLog("`4Daftar Farm kosong! Tambahkan world di tab Farm List atau masuk ke world farm.")
+            notifyMsg("Daftar Farm kosong!")
+            return false
+        end
     end
-    runAsync(harvestLoopRunner)
+
+    -- Otomatis reset status world yang sebelumnya 'Done', 'DC/Retry', atau 'No Ready Trees' menjadi 'Ready'
+    local hasPending = false
+    for _, r in ipairs(HV.STATE.rows) do
+        if r.status ~= "Done" and r.status ~= "Inaccessible" and r.status ~= "Invalid ID" then
+            hasPending = true
+        end
+    end
+    if not hasPending then
+        for _, r in ipairs(HV.STATE.rows) do
+            if r.status ~= "Inaccessible" and r.status ~= "Invalid ID" then
+                r.status = "Ready"
+            end
+        end
+        HV.saveData()
+        addLog("`a[Auto] Status antrean farm di-reset ke Ready!")
+    end
+
+    -- Jalankan coroutine dengan pcall pelindung agar error tidak hilang diam-diam
+    if runCoroutine then
+        local okCoro, errCoro = pcall(runCoroutine, function()
+            local okMain, errMain = pcall(harvestLoopRunner)
+            if not okMain then
+                HV.STATE.running = false
+                HV.STATE.enabled = false
+                addLog("`4[Runtime Error] " .. tostring(errMain))
+                notifyMsg("Harvest Error: " .. tostring(errMain))
+            end
+        end)
+        if not okCoro then
+            HV.STATE.running = false
+            addLog("`4[Coroutine Error] " .. tostring(errCoro))
+            return false
+        end
+    else
+        runAsync(harvestLoopRunner)
+    end
     return true
 end
 

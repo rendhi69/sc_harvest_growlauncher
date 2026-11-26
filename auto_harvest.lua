@@ -82,9 +82,9 @@ HV.CFG = {
     default_ev_limit   = 10000,         -- Default limit event world
     ignore_gems        = true,          -- Blokir collect Gems (ID 112)
     ignore_take_drop   = true,          -- Ignore take block/seed saat drop di save/event world
-    harvest_mode       = "teleport",     -- "3zigzag" | "1by1"
-    harvest_delay      = 180,
-    step_delay         = 110,
+    harvest_mode       = "1by1",        -- "1by1" (Default: Halus & Cepat 1 Tree) | "3zigzag"
+    harvest_delay      = 70,
+    step_delay         = 45,
     warp_delay         = 4500,
     use_modfly         = true,
     loop_enabled       = false,
@@ -997,15 +997,25 @@ local function ensureHVOnline(row, resumeCollect)
 end
 
 local function punchTile(tx, ty)
-    if not sendPacketRaw then return false end
+    if not sendPacketRaw and not punch then return false end
     if HUB_REF and HUB_REF.conn and HUB_REF.conn.STATE and HUB_REF.conn.STATE.reconnecting then return false end
     local p = getLocalSafe()
     local px = (p and (p.posX or (p.pos and p.pos.x))) or (tx * 32)
     local py = (p and (p.posY or (p.pos and p.pos.y))) or (ty * 32)
-    return pcall(sendPacketRaw, false, {
-        type = 3, value = ITEM.PUNCH, px = tx, py = ty, x = px, y = py,
-        state = (px > tx * 32) and 48 or 32,
-    })
+    local state = (px > (tx * 32)) and 48 or 32
+    if sendPacketRaw then
+        pcall(sendPacketRaw, false, {
+            type  = 3,
+            value = 18,
+            px    = tx,
+            py    = ty,
+            x     = px,
+            y     = py,
+            state = state,
+        })
+    end
+    if punch then pcall(punch, tx, ty) end
+    return true
 end
 
 local function collectNearbyAllowed(allowedSet, radiusTiles)
@@ -1989,53 +1999,33 @@ end
 
 local function teleportToTree(tx, ty)
     if not HV.STATE.running then return false end
-    if editToggle then
+    if editToggle and HV.CFG.use_modfly ~= false then
         pcall(editToggle, "ModFly", true)
         pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
     end
 
     local curX, curY = getPlayerPos()
-    if curX and curY and math.abs(curX - tx) <= 2 and math.abs(curY - ty) <= 2 then
-        return true
-    end
+    if curX == tx and curY == ty then return true end
 
     local pFn = FindPath or findPath
     if pFn then
         pcall(pFn, tx, ty)
     end
-    if sendPacketRaw then
-        pcall(sendPacketRaw, false, {
-            type  = 0,
-            pos   = { x = tx * 32, y = ty * 32 },
-            x     = tx * 32,
-            y     = ty * 32,
-            state = 32
-        })
-    end
-
-    local maxWait = math.max(120, (tonumber(HV.CFG.step_delay) or 110) * 2)
-    local waited = 0
-    while waited < maxWait and HV.STATE.running do
-        safeSleep(20)
-        waited = waited + 20
-        local px, py = getPlayerPos()
-        if px and py and math.abs(px - tx) <= 2 and math.abs(py - ty) <= 2 then return true end
-    end
-
-    moveSafeTo(tx, ty, false)
+    safeSleep(HV.CFG.step_delay or 40)
     return true
 end
 
 local function fastTakeAround(allowedSet, rad)
     if HV.STATE.in_save_world or HV.STATE.anti_take or HV.STATE.is_dropping then return end
-    rad = rad or 4
+    rad = rad or 3
     local px, py = getPlayerPos()
     if not px or not py then return end
     forEachWorldObject(function(oid, uid, amt, ox, oy)
         if HV.CFG.ignore_gems and oid == ITEM.GEMS then return end
         if (not allowedSet) or allowedSet[oid] then
-            local otx = math.floor((ox or 0) / 32)
-            local oty = math.floor((oy or 0) / 32)
+            local otx = math.floor(((ox or 0) + 10) / 32)
+            local oty = math.floor(((oy or 0) + 10) / 32)
             if math.abs(otx - px) <= rad and math.abs(oty - py) <= rad then
                 if sendPacketRaw then
                     pcall(sendPacketRaw, false, { type = 11, value = uid, x = ox, y = oy })
@@ -2050,29 +2040,19 @@ end
 -- Validasi pukulan pohon: memastikan pohon benar-benar telah dipanen (hancur), responsif dan cepat
 local function harvestTreeTile(tx, ty, seedID, blockID, hDelay, allowedSet)
     if not isReadyTree(tx, ty, seedID, blockID) then return true end
-    local maxWait = math.max(50, math.min(250, tonumber(hDelay) or 120))
-    for attempt = 1, 3 do
-        if not HV.STATE.running then return false end
-        punchTile(tx, ty)
+    punchTile(tx, ty)
+    local pDelay = math.max(35, math.min(120, tonumber(hDelay) or 60))
+    safeSleep(pDelay)
 
-        -- Reactive polling 15ms: langsung lanjut begitu pohon pecah (tidak delay kaku statis)
-        local waited = 0
-        while waited < maxWait and HV.STATE.running do
-            safeSleep(15)
-            waited = waited + 15
-            if isTreeBroken(tx, ty, seedID, blockID) then
-                HV.STATE.total_harvested = HV.STATE.total_harvested + 1
-                if allowedSet then fastTakeAround(allowedSet, 4) end
-                return true
-            end
-        end
+    -- Verifikasi cepat: jika ada lag, punch sekali lagi agar 100% pecah
+    if isReadyTree(tx, ty, seedID, blockID) then
+        punchTile(tx, ty)
+        safeSleep(30)
     end
-    if isTreeBroken(tx, ty, seedID, blockID) then
-        HV.STATE.total_harvested = HV.STATE.total_harvested + 1
-        if allowedSet then fastTakeAround(allowedSet, 4) end
-        return true
-    end
-    return false
+
+    HV.STATE.total_harvested = HV.STATE.total_harvested + 1
+    if allowedSet then fastTakeAround(allowedSet, 3) end
+    return true
 end
 
 local function scanWorldReadyTrees(seedID, blockID)
@@ -2144,71 +2124,126 @@ local function checkAndDropIfFull(row, blockID, seedID, eventList, forceDrop)
 end
 _G.checkAndDropIfFull = checkAndDropIfFull
 
-local function harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
-    local maxPasses = 3
-    for pass = 1, maxPasses do
-        if not HV.STATE.running then return false end
-        local treeList = scanWorldReadyTrees(seedID, blockID)
-        local totalCount = #treeList
-        if totalCount == 0 then
-            addLog(string.format("`2[Validasi Pohon] Selesai 100%%! Tidak ada pohon tersisa di %s.", row.name))
-            break
+local function harvest1By1Serpentine(row, seedID, blockID, hDelay, allowedSet, eventList)
+    local pFn = FindPath or findPath
+    local sDelay = math.max(25, math.min(100, tonumber(HV.CFG.step_delay) or 45))
+    local pDelay = math.max(35, math.min(120, tonumber(hDelay) or 60))
+
+    if editToggle and HV.CFG.use_modfly ~= false then
+        pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
+        pcall(editToggle, "No Lava", true)
+    end
+    setCollectCheats(true)
+
+    -- 1. Scan semua baris Y yang memiliki pohon target siap panen
+    local treeRows = {}
+    for ty = 1, 53 do
+        local count = 0
+        for tx = 2, 97 do
+            if isReadyTree(tx, ty, seedID, blockID) then
+                count = count + 1
+            end
         end
+        if count > 0 then
+            table.insert(treeRows, ty)
+        end
+    end
 
-        addLog(string.format("`a[Harvest Per-Tree] Memanen %d pohon di %s (Pass %d/%d)...", totalCount, row.name, pass, maxPasses))
+    if #treeRows == 0 then return true end
 
-        for i, tr in ipairs(treeList) do
+    local totalRows = #treeRows
+    local rowIdx = 0
+
+    for _, ty in ipairs(treeRows) do
+        if not HV.STATE.running then return false end
+        if not ensureHVOnline(row, true) then return false end
+
+        rowIdx = rowIdx + 1
+        local l2r = (rowIdx % 2 == 1)
+        local startX = l2r and 2 or 97
+        local endX   = l2r and 97 or 2
+        local stepX  = l2r and 1 or -1
+
+        -- Pindah ke awal baris secara mulus & responsif
+        HV.STATE.status_text = string.format("Panen Baris %d/%d (Y: %d)...", rowIdx, totalRows, ty)
+        moveSafeTo(startX, ty, false)
+        safeSleep(sDelay)
+
+        local x = startX
+        while (l2r and x <= endX) or ((not l2r) and x >= endX) do
             if not HV.STATE.running then return false end
             if not ensureHVOnline(row, true) then return false end
 
-            if isReadyTree(tr.x, tr.y, seedID, blockID) then
-                if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+            if isReadyTree(x, ty, seedID, blockID) then
+                -- Cek tas & auto drop jika penuh
+                checkAndDropIfFull(row, blockID, seedID, eventList, false)
 
-                HV.STATE.status_text = string.format("Panen [%d/%d] (%d,%d)...", i, totalCount, tr.x, tr.y)
+                -- 1. Gerak langsung ke tile pohon (x, ty) secara presisi & halus
+                local curPx, curPy = getPlayerPos()
+                if curPx ~= x or curPy ~= ty then
+                    if pFn then pcall(pFn, x, ty) end
+                    safeSleep(sDelay)
+                end
 
-                -- Teleport langsung ke pohon
-                teleportToTree(tr.x, tr.y)
+                -- 2. PUNCH pohon dengan pasti
+                punchTile(x, ty)
+                safeSleep(pDelay)
 
-                -- Fast take sebelum & sesudah punch
-                fastTakeAround(allowedSet, 4)
+                -- Verifikasi cepat: punch lagi jika ada lag/delay
+                if isReadyTree(x, ty, seedID, blockID) then
+                    punchTile(x, ty)
+                    safeSleep(30)
+                end
 
-                -- Panen pohon secara responsif
-                harvestTreeTile(tr.x, tr.y, seedID, blockID, hDelay, allowedSet)
+                HV.STATE.total_harvested = HV.STATE.total_harvested + 1
 
-                -- Micro sleep agar pacing seimbang
-                safeSleep(15)
+                -- 3. AUTO COLLECT LANGSUNG DI TILE POHON
+                fastTakeAround(allowedSet, 3)
             end
+
+            x = x + stepX
         end
 
-        safeSleep(100)
+        -- Sapu sisa drop di akhir baris
+        fastTakeAround(allowedSet, 4)
+        safeSleep(sDelay)
     end
+
     return true
 end
 
+local function harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
+    return harvest1By1Serpentine(row, seedID, blockID, hDelay, allowedSet, eventList)
+end
+
 local function auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
-    local maxPasses = 3
+    local maxPasses = 2
     for pass = 1, maxPasses do
         if not HV.STATE.running then return false end
         local remaining = scanWorldReadyTrees(seedID, blockID)
-        if #remaining == 0 then
-            return true
-        end
+        if #remaining == 0 then return true end
 
-        addLog(string.format("`e[Audit Pohon] Ditemukan %d sisa pohon matang di %s (Audit %d/%d)     membersihkan...", #remaining, row.name, pass, maxPasses))
-        HV.STATE.status_text = string.format("Membersihkan %d sisa pohon...", #remaining)
+        addLog(string.format("`e[Audit Pohon] Ditemukan %d sisa pohon matang     membersihkan...", #remaining))
+        HV.STATE.status_text = string.format("Audit %d sisa pohon...", #remaining)
 
         for _, tr in ipairs(remaining) do
             if not HV.STATE.running then return false end
             if not ensureHVOnline(row, true) then return false end
             if isReadyTree(tr.x, tr.y, seedID, blockID) then
-                if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
-                teleportToTree(tr.x, tr.y)
-                fastTakeAround(allowedSet, 4)
-                harvestTreeTile(tr.x, tr.y, seedID, blockID, hDelay, allowedSet)
-                safeSleep(15)
+                checkAndDropIfFull(row, blockID, seedID, eventList, false)
+                moveSafeTo(tr.x, tr.y, false)
+                safeSleep(30)
+                punchTile(tr.x, tr.y)
+                safeSleep(math.max(35, tonumber(hDelay) or 60))
+                if isReadyTree(tr.x, tr.y, seedID, blockID) then
+                    punchTile(tr.x, tr.y)
+                    safeSleep(30)
+                end
+                fastTakeAround(allowedSet, 3)
             end
         end
-        safeSleep(120)
+        safeSleep(80)
     end
     return true
 end
@@ -2331,13 +2366,10 @@ local function processFarmWorld(row)
         addLog(string.format("`a[Harvest] Menemukan pohon target %s di %s (Seed: %d, Block: %d)", resolveItemName(seedID), row.name, seedID, blockID))
     end
 
-    local hDelay = math.max(60, tonumber(HV.CFG.harvest_delay) or 120)
-    local mode = HV.CFG.harvest_mode or "teleport"
+    local hDelay = math.max(35, tonumber(HV.CFG.harvest_delay) or 70)
+    local mode = HV.CFG.harvest_mode or "1by1"
 
-    if mode == "teleport" then
-        -- Mode Utama & Direkomendasikan: Teleport Per Tree + Fast Take (Responsif & Cepat)
-        harvestAllTreesPerTree(row, seedID, blockID, hDelay, allowedSet, eventList)
-    elseif mode == "3zigzag" then
+    if mode == "3zigzag" then
         -- Mode 3-Zigzag Klasik
         local treeRows = {}
         for testY = 1, 53 do
@@ -2374,7 +2406,7 @@ local function processFarmWorld(row)
                 local t3 = isReadyTree(x + (stepX * 2), ty, seedID, blockID)
 
                 if t1 or t2 or t3 then
-                    if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
+                    checkAndDropIfFull(row, blockID, seedID, eventList, false)
                     local standY = py
                     local tFloor = getTileSafe(x, py)
                     if tFloor and tFloor.collidable then standY = ty end
@@ -2394,52 +2426,10 @@ local function processFarmWorld(row)
         end
         auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
     else
-        -- Mode 1-By-1
-        local treeRows = {}
-        for testY = 1, 53 do
-            local hasTree = false
-            for testX = 2, 97 do
-                if isReadyTree(testX, testY, seedID, blockID) then
-                    hasTree = true
-                    break
-                end
-            end
-            if hasTree then
-                table.insert(treeRows, testY)
-            end
-        end
-
-        local rowCount = 0
-        for _, ty in ipairs(treeRows) do
-            if not HV.STATE.running then return false end
-            rowCount = rowCount + 1
-            local l2r = (rowCount % 2 == 1)
-            local startX = l2r and 2 or 97
-            local endX   = l2r and 97 or 2
-            local stepX  = l2r and 1 or -1
-            local py = ty + 1
-
-            if not ensureHVOnline(row, true) then return false end
-            for x = startX, endX, stepX do
-                if not HV.STATE.running then return false end
-                if not ensureHVOnline(row, true) then return false end
-                if isReadyTree(x, ty, seedID, blockID) then
-                    if not checkAndDropIfFull(row, blockID, seedID, eventList, false) then return false end
-                    local standY = py
-                    local tFloor = getTileSafe(x, py)
-                    if tFloor and tFloor.collidable then standY = ty end
-                    moveSafeTo(x, standY)
-                    fastTakeAround(allowedSet, 4)
-                    harvestTreeTile(x, ty, seedID, blockID, hDelay, allowedSet)
-                    fastTakeAround(allowedSet, 4)
-                end
-            end
-        end
+        -- Mode 1-By-1 Tree Serpentine (Default: Halus, Cepat, Auto Collect Tiap Pohon)
+        harvest1By1Serpentine(row, seedID, blockID, hDelay, allowedSet, eventList)
         auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
     end
-
-    -- Audit & Validasi sisa pohon: pastikan 100% pohon matang telah dipanen dan tidak ada tersisa
-    auditAndFinishRemainingTrees(row, seedID, blockID, hDelay, allowedSet, eventList)
 
     -- Sapu sisa floating block / seed / event jika opsi take_floating aktif
     sweepFloatingObjects(row, blockID, seedID, allowedSet, eventList)
@@ -2548,6 +2538,11 @@ function HV.start()
     end
     HV.saveData()
     addLog("`a[Auto] Status antrean farm di-reset ke Ready!")
+
+    HV.STATE.in_save_world = false
+    HV.STATE.in_event_world = false
+    HV.STATE.anti_take = false
+    HV.STATE.is_dropping = false
 
     if editToggle and HV.CFG.use_modfly ~= false then
         pcall(editToggle, "ModFly", true)

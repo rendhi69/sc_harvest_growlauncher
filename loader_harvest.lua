@@ -1,5 +1,5 @@
 -- ============================================================================
--- LOADER BOREN STORE - AUTO HARVEST PRO v2.1.0 (COMPACT DIALOG)
+-- LOADER BOREN STORE - AUTO HARVEST PRO v2.2.0 (COMPACT DIALOG)
 -- File: loader_harvest.lua
 -- Repo: https://github.com/rendhi69/sc_harvest_growlauncher
 -- ============================================================================
@@ -113,7 +113,7 @@ local ONLINE_URLS = {
 }
 
 logMsg("`9Menghubungkan ke server untuk mengunduh Boren Auto Harvest Pro terbaru...")
-notifyUser("Memuat Boren Auto Harvest Pro v2.1.0...")
+notifyUser("Memuat Boren Auto Harvest Pro v2.2.0...")
 
 local fetcher = fetch or (http and http.get) or (client and client.fetch) or (growtopia and growtopia.fetch)
 local content = nil
@@ -142,7 +142,7 @@ end
 -- EKSEKUSI SUMBER ONLINE (JIKA BERHASIL)
 -- ============================================================================
 if content and #content > 1000 then
-    logMsg("`2Berhasil mengunduh Auto Harvest Pro v2.1.0 (" .. tostring(#content) .. " bytes)!")
+    logMsg("`2Berhasil mengunduh Auto Harvest Pro v2.2.0 (" .. tostring(#content) .. " bytes)!")
 
     -- Sinkronisasi otomatis ke file penyimpanan lokal agar cache HP tidak usang
     for _, p in ipairs(LOCAL_PATHS) do
@@ -160,8 +160,8 @@ if content and #content > 1000 then
     if chunk then
         local okRun, runErr = pcall(chunk)
         if okRun then
-            logMsg("`2[ONLINE v2.1.0] Boren Auto Harvest Pro Berhasil Aktif!")
-            notifyUser("`2[ONLINE v2.1.0] Boren Auto Harvest Siap! (/hv)")
+            logMsg("`2[ONLINE v2.2.0] Boren Auto Harvest Pro Berhasil Aktif!")
+            notifyUser("`2[ONLINE v2.2.0] Boren Auto Harvest Siap! (/hv)")
             if _G.showHarvestMainDialog then pcall(_G.showHarvestMainDialog) end
             return
         else

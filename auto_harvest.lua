@@ -1883,9 +1883,9 @@ end
 local function isTileTreeReady(t)
     if not t then return false end
     local fg = tonumber(t.fg) or 0
-    if fg <= 0 then return false end
+    if fg <= 0 or (fg % 2 == 0) then return false end -- Pohon selalu bernilai ganjil (Seed ID)
 
-    -- 1. Explicit ready flags (boolean / string / number / method)
+    -- 1. Explicit ready flags (Growlauncher standard)
     if t.readyharvest == true or t.readyharvest == 1 or t.readyharvest == "true" then return true end
     if type(t.readyharvest) == "function" then
         local ok, r = pcall(t.readyharvest, t)
@@ -1895,23 +1895,9 @@ local function isTileTreeReady(t)
     end
 
     if t.ready_to_harvest == true or t.ready_to_harvest == 1 or t.ready_to_harvest == "true" then return true end
-    if type(t.ready_to_harvest) == "function" then
-        local ok, r = pcall(t.ready_to_harvest, t)
-        if ok and (r == true or r == 1) then return true end
-    end
-
     if t.ready_harvest == true or t.ready_harvest == 1 or t.ready_harvest == "true" then return true end
     if t.ready == true or t.ready == 1 or t.ready == "true" then return true end
-    if type(t.ready) == "function" then
-        local ok, r = pcall(t.ready, t)
-        if ok and (r == true or r == 1) then return true end
-    end
-
     if t.isReady == true or t.is_ready == true then return true end
-    if type(t.isReady) == "function" then
-        local ok, r = pcall(t.isReady, t)
-        if ok and (r == true or r == 1) then return true end
-    end
 
     -- 2. canHarvest / can_harvest (boolean / method)
     if t.canHarvest ~= nil then
@@ -1931,15 +1917,22 @@ local function isTileTreeReady(t)
         end
     end
 
-    -- 3. Direct fruit count on tile
-    local directFruits = tonumber(t.fruitcount or t.fruit_count or t.fruits or t.fruit) or 0
-    if directFruits > 0 then return true end
+    -- 3. Tile flag (Growtopia mature tree bit: 0x10 = 16 atau 0x20 = 32)
+    local fl = tonumber(t.flag or t.flags)
+    if fl and fl > 0 then
+        if bit32 and bit32.band(fl, 0x10) ~= 0 then return true end
+        if (fl % 32 >= 16) or (fl % 64 >= 32) then return true end
+    end
 
     -- 4. Progress (>= 1.0 float atau >= 100 percentage)
     local prog = tonumber(t.progress)
     if prog and (prog >= 1.0 or prog >= 100) then return true end
 
-    -- 5. Extra table / userdata (fruit count > 0 atau growth <= 0 pada seed)
+    -- 5. Direct fruit count on tile
+    local directFruits = tonumber(t.fruitcount or t.fruit_count or t.fruits or t.fruit) or 0
+    if directFruits > 0 then return true end
+
+    -- 6. Extra table / userdata (fruit count > 0 atau growth <= 0)
     if t.extra and (type(t.extra) == "table" or type(t.extra) == "userdata") then
         local okF, fCount = pcall(function()
             return tonumber(t.extra.fruitcount or t.extra.fruit_count or t.extra.fruits or t.extra.fruit)
@@ -1949,36 +1942,28 @@ local function isTileTreeReady(t)
         local okG, growth = pcall(function()
             return tonumber(t.extra.growth or t.extra.time_left or t.extra.grow_time)
         end)
-        if okG and growth and growth <= 0 and (fg % 2 == 1) then
-            return true
-        end
+        if okG and growth and growth <= 0 then return true end
     end
 
-    -- 6. Direct growth <= 0 on tree tile
+    -- 7. Direct growth <= 0
     local directGrowth = tonumber(t.growth or t.time_left)
-    if directGrowth and directGrowth <= 0 and (fg % 2 == 1) then
-        return true
-    end
+    if directGrowth and directGrowth <= 0 then return true end
 
-    -- 7. Tile flags (mature tree flag 0x0010 atau 0x0020)
-    local flags = tonumber(t.flags)
-    if flags and (fg % 2 == 1) then
-        if (flags % 32 >= 16) or (flags % 64 >= 32) then return true end
-    end
-
-    return false
+    -- 8. Fallback GTPS / Private Server:
+    -- Jika di world terdapat pohon seed yang ditanam (fg % 2 == 1), anggap siap dipanen
+    return true
 end
 
 local function isReadyTree(tx, ty, seedID, blockID)
     local t = getTileSafe(tx, ty)
     if not t then return false end
     local fg = tonumber(t.fg) or 0
-    if fg <= 0 then return false end
+    if fg <= 0 or (fg % 2 == 0) then return false end
 
     -- Cocokkan fg dengan seedID atau blockID bila disediakan
     local matchesID = false
     if seedID and seedID > 0 and fg == seedID then matchesID = true end
-    if (not matchesID) and blockID and blockID > 0 and fg == blockID then matchesID = true end
+    if (not matchesID) and blockID and blockID > 0 and (fg == blockID or fg == blockID + 1) then matchesID = true end
 
     -- Jika ID diberikan dan tidak cocok dengan fg, bukan pohon target
     if (seedID and seedID > 0) and not matchesID then return false end
@@ -2001,7 +1986,14 @@ local function teleportToTree(tx, ty)
     if not HV.STATE.running then return false end
     if editToggle then
         pcall(editToggle, "ModFly", true)
+        pcall(editToggle, "Anti Lava", true)
     end
+
+    local curX, curY = getPlayerPos()
+    if curX and curY and math.abs(curX - tx) <= 2 and math.abs(curY - ty) <= 2 then
+        return true
+    end
+
     local pFn = FindPath or findPath
     if pFn then
         pcall(pFn, tx, ty)
@@ -2015,17 +2007,17 @@ local function teleportToTree(tx, ty)
             state = 32
         })
     end
-    local curX, curY = getPlayerPos()
-    if curX == tx and curY == ty then return true end
 
+    local maxWait = math.max(120, (tonumber(HV.CFG.step_delay) or 110) * 2)
     local waited = 0
-    while waited < 60 and HV.STATE.running do
-        safeSleep(15)
-        waited = waited + 15
+    while waited < maxWait and HV.STATE.running do
+        safeSleep(20)
+        waited = waited + 20
         local px, py = getPlayerPos()
-        if px == tx and py == ty then return true end
+        if px and py and math.abs(px - tx) <= 2 and math.abs(py - ty) <= 2 then return true end
     end
-    moveSafeTo(tx, ty, true)
+
+    moveSafeTo(tx, ty, false)
     return true
 end
 
@@ -2503,11 +2495,16 @@ local function harvestLoopRunner()
 end
 
 function HV.start()
-    if HV.STATE.running then return false end
+    if HV.STATE.running then
+        addLog("`eAuto Harvest sudah berjalan!")
+        return false
+    end
+
+    if LogToConsole then pcall(LogToConsole, "`2[BOREN HARVEST] Start Auto Harvest dipicu!") end
 
     -- Jika daftar farm masih kosong, otomatis masukkan world aktif saat ini
+    local curW = getCurrentWorldSafe()
     if #HV.STATE.rows == 0 then
-        local curW = getCurrentWorldSafe()
         if curW and curW ~= "" and curW ~= "EXIT" then
             table.insert(HV.STATE.rows, { name = curW, door = "", item_id = HV.CFG.default_item_id, status = "Ready" })
             HV.saveData()
@@ -2519,22 +2516,16 @@ function HV.start()
         end
     end
 
-    -- Otomatis reset status world yang sebelumnya 'Done', 'DC/Retry', atau 'No Ready Trees' menjadi 'Ready'
-    local hasPending = false
+    -- Selalu reset status world agar bisa langsung jalan tanpa tertahan status lama
     for _, r in ipairs(HV.STATE.rows) do
-        if r.status ~= "Done" and r.status ~= "Inaccessible" and r.status ~= "Invalid ID" then
-            hasPending = true
+        if curW and r.name == curW then
+            r.status = "Ready"
+        elseif r.status == "Done" or r.status == "No Ready Trees" or r.status == "DC/Retry" then
+            r.status = "Ready"
         end
     end
-    if not hasPending then
-        for _, r in ipairs(HV.STATE.rows) do
-            if r.status ~= "Inaccessible" and r.status ~= "Invalid ID" then
-                r.status = "Ready"
-            end
-        end
-        HV.saveData()
-        addLog("`a[Auto] Status antrean farm di-reset ke Ready!")
-    end
+    HV.saveData()
+    addLog("`a[Auto] Status antrean farm di-reset ke Ready!")
 
     -- Jalankan coroutine dengan pcall pelindung agar error tidak hilang diam-diam
     if runCoroutine then
@@ -2605,7 +2596,7 @@ DLG.showHarvestMainDialog = function()
     local lines = {
         "set_default_color|`o",
         "add_quick_exit|",
-        "add_label_with_icon|big|`wBoren Auto Harvest Pro v2.1.0``|left|1830|",
+        "add_label_with_icon|big|`wBoren Auto Harvest Pro v2.2.0``|left|1830|",
         "add_spacer|small|",
         "add_textbox|`p------------------------------------------------------------|left|",
         string.format("add_textbox|`wStatus: %s `p- `wWorld: `b%s `p- `wMode: %s|left|", stBadge, curW, modeTxt),
@@ -5285,4 +5276,5 @@ else
     if openFn then pcall(openFn) end
 end
 
+_G.HV = HV
 return HV
